@@ -1,0 +1,14 @@
+.vercel/
+latest.json
+
+# Environment variables
+.env*.local
+
+# Common ignores
+node_modules
+.next/
+out/
+src-tauri/target/
+.vs/
+tsconfig.tsbuildinfo
+.DS_Store

@@ -1,0 +1,66 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Voxis Mic Control",
+  "version": "1.1.0",
+  "identifier": "com.voxis.miccontrol",
+  "build": {
+    "frontendDist": "../out",
+    "devUrl": "http://localhost:3000",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Voxis Mic Control",
+        "width": 644,
+        "height": 552,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true
+      },
+      {
+        "label": "popup",
+        "url": "/popup",
+        "width": 96,
+        "height": 96,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "android": {
+      "debugApplicationIdSuffix": ".debug"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk0RTM1NTFCRTlFMUM5MjUKUldRbHllSHBHMVhqbERBMTkyNVU0L1p5ajFwZG9Ucm1OcmlWeElDOFpxZ0pyQ0M2aTNNT2NMcmgK",
+      "endpoints": [
+        "https://github.com/Squibble34/Voxis-Mic-Control/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
