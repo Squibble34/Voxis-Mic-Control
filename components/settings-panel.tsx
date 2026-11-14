@@ -1,19 +1,24 @@
 "use client"
 
 import * as React from "react"
-import { AppWindow, Info, Keyboard, Palette, ShieldAlert, Sparkles } from "lucide-react"
+import { AppWindow, AudioWaveform, Info, Keyboard, Palette, ShieldAlert, Sparkles } from "lucide-react"
+import { invoke } from "@tauri-apps/api/core"
 import { getVersion } from "@tauri-apps/api/app"
 import { CHANGELOG } from "@/lib/changelog"
 import { SlidersHorizontalIcon, type SlidersHorizontalIconHandle } from "@/components/icons/sliders-horizontal-icon"
 import {
   DEFAULT_APPEARANCE_SETTINGS,
   DEFAULT_KEYBINDS_SETTINGS,
+  DEFAULT_NOISE_SETTINGS,
   DEFAULT_SYSTEM_SETTINGS,
   DEFAULT_WINDOWS_SETTINGS,
   THEME_PRIMARY_HEX,
   type AppearanceSettings,
   type KeybindsSettings,
+  type NoiseEngineId,
+  type NoiseSettings,
   type SystemSettings,
+  type VoiceToneId,
   type WindowsSettings,
 } from "@/lib/settings-types"
 
@@ -33,10 +38,11 @@ import {
   ToggleRow,
 } from "@/components/settings-controls"
 
-type SectionId = "general" | "windows" | "behavior" | "appearance" | "keybinds" | "danger"
+type SectionId = "general" | "noise" | "windows" | "behavior" | "appearance" | "keybinds" | "danger"
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ElementType | null }[] = [
   { id: "general", label: "General", icon: Info },
+  { id: "noise", label: "Noise", icon: AudioWaveform },
   { id: "windows", label: "Windows", icon: AppWindow },
   { id: "behavior", label: "Behavior", icon: null },
   { id: "appearance", label: "Appearance", icon: Palette },
@@ -46,12 +52,25 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ElementType | null }
 
 const ICON_HOVER_ANIMATION: Record<SectionId, string> = {
   general: "group-hover:animate-pop",
+  noise: "group-hover:animate-bob",
   windows: "group-hover:animate-wiggle",
   behavior: "group-hover:animate-heartbeat",
   appearance: "group-hover:animate-hue-cycle",
   keybinds: "group-hover:animate-bob",
   danger: "group-hover:animate-shake",
 }
+
+const NOISE_ENGINE_OPTIONS = [
+  { value: "off", label: "Off" },
+  { value: "rnnoise", label: "RNNoise" },
+  { value: "deepfilternet", label: "DeepFilterNet" },
+]
+
+const VOICE_TONE_OPTIONS = [
+  { value: "natural", label: "Natural" },
+  { value: "warm", label: "Warm" },
+  { value: "crisp", label: "Crisp" },
+]
 
 const STARTUP_STATE_OPTIONS = [
   { value: "tray", label: "Hidden in tray" },
@@ -73,7 +92,8 @@ const POPUP_LOCATION_OPTIONS = [
 
 const FUN_MODE_CLICKS = 3
 const FUN_MODE_WINDOW_MS = 600
-const GITHUB_REPO = "Squibble34/Voxis-Mic-Control"
+
+export type PendingUpdateInfo = { version: string; notes: string }
 
 export function SettingsPanel({
   systemSettings,
@@ -84,6 +104,8 @@ export function SettingsPanel({
   onKeybindsSettingsChange,
   windowsSettings,
   onWindowsSettingsChange,
+  noiseSettings,
+  onNoiseSettingsChange,
   funModeUnlocked,
   onFunModeUnlockedChange,
   funModeEnabled,
@@ -94,6 +116,10 @@ export function SettingsPanel({
   onRandomMuteChange,
   normalVolume,
   onNormalVolumeChange,
+  funnyMic,
+  onFunnyMicChange,
+  pendingUpdate,
+  onPendingUpdateChange,
 }: {
   systemSettings: SystemSettings
   onSystemSettingsChange: (patch: Partial<SystemSettings>) => void
@@ -103,6 +129,8 @@ export function SettingsPanel({
   onKeybindsSettingsChange: (patch: Partial<KeybindsSettings>) => void
   windowsSettings: WindowsSettings
   onWindowsSettingsChange: (patch: Partial<WindowsSettings>) => void
+  noiseSettings: NoiseSettings
+  onNoiseSettingsChange: (patch: Partial<NoiseSettings>) => void
   funModeUnlocked: boolean
   onFunModeUnlockedChange: (unlocked: boolean) => void
   funModeEnabled: boolean
@@ -113,34 +141,60 @@ export function SettingsPanel({
   onRandomMuteChange: (enabled: boolean) => void
   normalVolume: boolean
   onNormalVolumeChange: (enabled: boolean) => void
+  funnyMic: boolean
+  onFunnyMicChange: (enabled: boolean) => void
+  pendingUpdate: PendingUpdateInfo | null
+  onPendingUpdateChange: (update: PendingUpdateInfo | null) => void
 }) {
   const [active, setActive] = React.useState<SectionId>("general")
   const activeIndex = SECTIONS.findIndex((section) => section.id === active)
   const slidersRef = React.useRef<SlidersHorizontalIconHandle>(null)
   const [appVersion, setAppVersion] = React.useState("")
-  const [updateStatus, setUpdateStatus] = React.useState<"idle" | "checking" | "current" | "available" | "error">("idle")
-  const [latestVersion, setLatestVersion] = React.useState<string | null>(null)
+  const [updateStatus, setUpdateStatus] = React.useState<
+    "idle" | "checking" | "current" | "available" | "installing" | "error" | "install-error"
+  >(() => (pendingUpdate ? "available" : "idle"))
+  const [latestVersion, setLatestVersion] = React.useState<string | null>(
+    () => pendingUpdate?.version ?? null,
+  )
 
   React.useEffect(() => {
     getVersion().then(setAppVersion).catch(console.error)
   }, [])
 
-  function handleCheckForUpdate() {
+  React.useEffect(() => {
+    if (pendingUpdate && (updateStatus === "idle" || updateStatus === "current")) {
+      setLatestVersion(pendingUpdate.version)
+      setUpdateStatus("available")
+    }
+  }, [pendingUpdate, updateStatus])
+
+  async function handleCheckForUpdate() {
     setUpdateStatus("checking")
-    fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`)
-      .then((res) => {
-        if (!res.ok) throw new Error(`GitHub API returned ${res.status}`)
-        return res.json()
-      })
-      .then((release: { tag_name: string }) => {
-        const tag = release.tag_name.replace(/^v/, "")
-        setLatestVersion(tag)
-        setUpdateStatus(tag === appVersion ? "current" : "available")
-      })
-      .catch((err) => {
-        console.error("Update check failed:", err)
-        setUpdateStatus("error")
-      })
+    try {
+      const update = await invoke<PendingUpdateInfo | null>("check_for_update")
+      if (update) {
+        setLatestVersion(update.version)
+        setUpdateStatus("available")
+        onPendingUpdateChange(update)
+      } else {
+        setLatestVersion(null)
+        setUpdateStatus("current")
+        onPendingUpdateChange(null)
+      }
+    } catch (err) {
+      console.error("Update check failed:", err)
+      setUpdateStatus("error")
+    }
+  }
+
+  async function handleInstallUpdate() {
+    setUpdateStatus("installing")
+    try {
+      await invoke("install_update")
+    } catch (err) {
+      console.error("Update install failed:", err)
+      setUpdateStatus("install-error")
+    }
   }
 
   const scrollRef = React.useRef<HTMLDivElement | null>(null)
@@ -184,10 +238,12 @@ export function SettingsPanel({
     onSystemSettingsChange(DEFAULT_SYSTEM_SETTINGS)
     onAppearanceSettingsChange(DEFAULT_APPEARANCE_SETTINGS)
     onKeybindsSettingsChange(DEFAULT_KEYBINDS_SETTINGS)
+    onNoiseSettingsChange(DEFAULT_NOISE_SETTINGS)
     onFunModeEnabledChange(false)
     onCrazyColorsChange(false)
     onRandomMuteChange(false)
     onNormalVolumeChange(false)
+    onFunnyMicChange(false)
   }
 
   return (
@@ -246,24 +302,184 @@ export function SettingsPanel({
         <SettingsSection title="About" description="Version and changelogs.">
           <SettingsGroup>
             <ActionRow
-            label="Version"
-            hint={
-              appVersion
-                ? updateStatus === "current"
-                ? `v${appVersion} - up to date`
-                  : updateStatus === "available"
-                    ? `v${appVersion} - v${latestVersion} available`
-                    : updateStatus === "error"
-                      ? `v${appVersion} - couldn't check`
-                      : `v${appVersion}`
-                : "Loading…"
-            }
-            buttonLabel={updateStatus === "checking" ? "Checking…" : "Check for Update"}
-            onAction={handleCheckForUpdate}
-            disabled={updateStatus === "checking"}
-          />
+              label="Version"
+              hint={
+                appVersion
+                  ? updateStatus === "current"
+                    ? `v${appVersion} - up to date`
+                    : updateStatus === "available"
+                      ? `v${appVersion} - v${latestVersion} available`
+                      : updateStatus === "installing"
+                        ? `v${appVersion} - downloading & installing v${latestVersion}…`
+                        : updateStatus === "install-error"
+                          ? `v${appVersion} - install failed`
+                          : updateStatus === "error"
+                            ? `v${appVersion} - couldn't check`
+                            : `v${appVersion}`
+                  : "Loading…"
+              }
+              buttonLabel={
+                updateStatus === "checking"
+                  ? "Checking…"
+                  : updateStatus === "installing"
+                    ? "Installing…"
+                    : updateStatus === "available" || updateStatus === "install-error"
+                      ? "Install update"
+                      : "Check for Update"
+              }
+              buttonVariant={
+                updateStatus === "available" ||
+                updateStatus === "installing" ||
+                updateStatus === "install-error"
+                  ? "default"
+                  : "outline"
+              }
+              onAction={
+                updateStatus === "available" || updateStatus === "install-error"
+                  ? handleInstallUpdate
+                  : handleCheckForUpdate
+              }
+              disabled={updateStatus === "checking" || updateStatus === "installing"}
+            />
             <Separator />
             <ChangelogList entries={CHANGELOG} />
+          </SettingsGroup>
+        </SettingsSection>
+      )}
+
+      {active === "noise" && (
+        <SettingsSection
+          title="Noise Suppression"
+          description="Real-time voice isolation and virtual microphone routing."
+        >
+          <SettingsGroup
+            title="Suppression engine"
+            description="Switch between the 2 different DSP engines or turn off noise suppression completely."
+          >
+            <SegmentedRow
+              label="Active engine"
+              hint="RNNoise has low latency and minimal CPU usage. DeepFilterNet uses a more in depth system for better background isolation with the drawback of more CPU usage and latency."
+              value={noiseSettings.engine}
+              onValueChange={(value) =>
+                onNoiseSettingsChange({ engine: value as NoiseEngineId })
+              }
+              options={NOISE_ENGINE_OPTIONS}
+            />
+          </SettingsGroup>
+
+          <SettingsGroup
+            title="DeepFilterNet tuning"
+            description="Fine-tune suppression strength when DeepFilterNet is active."
+          >
+            <SliderRow
+              label="Attenuation limit"
+              hint="Maximum noise reduction in decibels. Lower values leave a natural room floor; 100 dB removes noise completely."
+              value={noiseSettings.attenLimDb}
+              onValueChange={(value) => onNoiseSettingsChange({ attenLimDb: value })}
+              min={10}
+              max={100}
+              step={5}
+              unit=" dB"
+              disabled={noiseSettings.engine !== "deepfilternet"}
+            />
+            <Separator />
+            <SliderRow
+              label="Post-filter strength"
+              hint="Extra suppression for residual noise. Keep at 0% unless loud noise still bleeds through."
+              value={Math.round(noiseSettings.postFilterBeta * 100)}
+              onValueChange={(value) =>
+                onNoiseSettingsChange({ postFilterBeta: value / 100 })
+              }
+              min={0}
+              max={5}
+              step={1}
+              unit="%"
+              disabled={noiseSettings.engine !== "deepfilternet"}
+            />
+          </SettingsGroup>
+
+          <SettingsGroup
+            title="Noise gate"
+            description="Fade the virtual mic to complete silence when your input level drops below a threshold."
+          >
+            <ToggleRow
+              label="Enable noise gate"
+              hint="Cuts out quiet breaths, mouth sounds, and faint room floor between sentences."
+              checked={noiseSettings.noiseGateEnabled}
+              onCheckedChange={(checked) =>
+                onNoiseSettingsChange({ noiseGateEnabled: checked })
+              }
+            />
+            <Separator />
+            <SliderRow
+              label="Gate threshold"
+              hint="Matches the Input level meter on the main page. Audio below this level is faded to silence."
+              value={noiseSettings.noiseGateThreshold}
+              onValueChange={(value) =>
+                onNoiseSettingsChange({ noiseGateThreshold: value })
+              }
+              min={1}
+              max={35}
+              step={1}
+              unit="%"
+              disabled={!noiseSettings.noiseGateEnabled}
+            />
+          </SettingsGroup>
+
+          <SettingsGroup
+            title="Voice shaping & gain"
+            description="Filter low end rumble, edit voice tone and volume."
+          >
+            <ToggleRow
+              label="Background/Rumble filter (80 Hz)"
+              hint="Removes desk thumps, AC hum, mic stand vibrations and other low noises before going through noise suppression."
+              checked={noiseSettings.highPassEnabled}
+              onCheckedChange={(checked) =>
+                onNoiseSettingsChange({ highPassEnabled: checked })
+              }
+            />
+            <Separator />
+            <SegmentedRow
+              label="Voice tone"
+              hint="Warm adds broadcast body; Crisp adds upper presence so your voice cuts through better."
+              value={noiseSettings.voiceTone}
+              onValueChange={(value) =>
+                onNoiseSettingsChange({ voiceTone: value as VoiceToneId })
+              }
+              options={VOICE_TONE_OPTIONS}
+            />
+            <Separator />
+            <ToggleRow
+              label="Voice compressor (auto-leveler)"
+              hint="Balances quiet and loud speech so your voice stays at a steady volume."
+              checked={noiseSettings.compressorEnabled}
+              onCheckedChange={(checked) =>
+                onNoiseSettingsChange({ compressorEnabled: checked })
+              }
+            />
+            <Separator />
+            <ToggleRow
+              label="Allow volume boost up to 200%"
+              hint="Expands the main volume slider past 100% with a soft limiter to prevent voice clipping."
+              checked={noiseSettings.volumeBoostEnabled}
+              onCheckedChange={(checked) =>
+                onNoiseSettingsChange({ volumeBoostEnabled: checked })
+              }
+            />
+          </SettingsGroup>
+
+          <SettingsGroup
+            title="Virtual microphone"
+            description="Control how Windows routes apps to Voxis Microphone."
+          >
+            <ToggleRow
+              label="Set Voxis Microphone as default input"
+              hint="Automatically set Voxis Microphone as the Windows default recording device when Voxis starts."
+              checked={noiseSettings.autoSetDefaultMic}
+              onCheckedChange={(checked) =>
+                onNoiseSettingsChange({ autoSetDefaultMic: checked })
+              }
+            />
           </SettingsGroup>
         </SettingsSection>
       )}
@@ -358,6 +574,15 @@ export function SettingsPanel({
                   onValueChange={(value) => onSystemSettingsChange({ popupLocation: value })}
                   options={POPUP_LOCATION_OPTIONS}
                   disabled={!systemSettings.popupEnabled}
+                />
+                <Separator />
+                <ToggleRow
+                  label="Warn when talking while muted"
+                  hint="Flash the on-screen indicator if Voxis detects sustained speech while your mic is muted."
+                  checked={systemSettings.talkingWhileMutedPopup}
+                  onCheckedChange={(checked) =>
+                    onSystemSettingsChange({ talkingWhileMutedPopup: checked })
+                  }
                 />
               </SettingsGroup>
 
@@ -538,6 +763,13 @@ export function SettingsPanel({
                         hint="Your volume slider periodically changes on its own, every 3–10 seconds."
                         checked={normalVolume}
                         onCheckedChange={onNormalVolumeChange}
+                      />
+                      <Separator />
+                      <ToggleRow
+                        label="funny mic"
+                        hint="Applies extreme bitcrush, walkie-talkie bandpass, and overdrive to Voxis Microphone."
+                        checked={funnyMic}
+                        onCheckedChange={onFunnyMicChange}
                       />
                     </SettingsGroup>
                   )}

@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next'
 import { Geist, Geist_Mono } from 'next/font/google'
+import { DisableContextMenu } from '@/components/disable-context-menu'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import './globals.css'
 
@@ -44,6 +45,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark bg-background">
       <body className="font-sans antialiased">
+        <DisableContextMenu />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

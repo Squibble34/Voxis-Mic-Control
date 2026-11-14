@@ -11,7 +11,6 @@ export type StatusSeverity = "ok" | "info" | "warning" | "error"
 
 export type StatusDescriptor = {
   severity: StatusSeverity
-  // shown in the window status bar
   shortLabel: string
   // banner heading, null means no banner is shown for this status
   title: string | null
@@ -101,10 +100,7 @@ export const HOTKEY_ISSUE: Record<HotkeyIssue, string | null> = {
   reserved: "Reserved by Windows and cannot be captured.",
 }
 
-// combinations windows claims before any app can register them
 const RESERVED = new Set(["Win+L", "Win+Tab", "Ctrl+Alt+Delete", "Win+G"])
-
-// simulates a global RegisterHotKey collision with a known resident app
 const TAKEN = new Set(["Ctrl+Shift+M", "Alt+F4", "Ctrl+Shift+Escape"])
 
 export function validateChord(chord: string[]): HotkeyIssue {

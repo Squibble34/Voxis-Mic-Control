@@ -2,7 +2,7 @@ use serde::Serialize;
 use windows::{
     core::*,
     Win32::Media::Audio::*,
-    Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation},
+    Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
     Win32::System::Com::*,
 };
 
@@ -41,7 +41,6 @@ fn get_default_mic() -> Result<IMMDevice> {
     unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eMultimedia) }
 }
 
-// falls back to a numbered label if the property store lookup fails
 fn friendly_name(device: &IMMDevice, index: u32) -> String {
     unsafe {
         let store: Result<IPropertyStore> = device.OpenPropertyStore(STGM_READ);
@@ -53,6 +52,62 @@ fn friendly_name(device: &IMMDevice, index: u32) -> String {
             s
         });
         name.unwrap_or_else(|| format!("Microphone {}", index + 1))
+    }
+}
+
+pub fn is_voxis_virtual_mic(name: &str) -> bool {
+    name.contains("Voxis Microphone")
+}
+
+pub fn find_voxis_virtual_mic_id() -> Option<String> {
+    let enumerator = get_device_enumerator().ok()?;
+    let collection = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }.ok()?;
+    let count = unsafe { collection.GetCount() }.ok()?;
+
+    for i in 0..count {
+        if let Ok(device) = unsafe { collection.Item(i) } {
+            let name = friendly_name(&device, i);
+            if is_voxis_virtual_mic(&name) {
+                let id_pwstr = unsafe { device.GetId() }.ok()?;
+                return unsafe { id_pwstr.to_string() }.ok();
+            }
+        }
+    }
+    None
+}
+
+// ipolicyconfig is an undocumented com interface, slot 13 in its vtable is setdefaultendpoint
+pub fn set_voxis_as_default_mic() -> Result<()> {
+    let _ = initialize_com();
+    let Some(voxis_id) = find_voxis_virtual_mic_id() else {
+        return Err(Error::from_hresult(HRESULT(-1)));
+    };
+
+    const CLSID_POLICY_CONFIG_CLIENT: GUID = GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
+    const IID_IPOLICY_CONFIG: GUID = GUID::from_u128(0xf8679f50_850a_41cf_9c72_430f290290c8);
+
+    unsafe {
+        let unknown: IUnknown = CoCreateInstance(&CLSID_POLICY_CONFIG_CLIENT, None, CLSCTX_ALL)?;
+        let mut policy_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        unknown.query(&IID_IPOLICY_CONFIG, &mut policy_ptr).ok()?;
+
+        let vtable = *(policy_ptr as *const *const *const core::ffi::c_void);
+        let set_default_endpoint: unsafe extern "system" fn(
+            *mut core::ffi::c_void,
+            PCWSTR,
+            ERole,
+        ) -> HRESULT = std::mem::transmute(*vtable.add(13));
+        let release: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32 =
+            std::mem::transmute(*vtable.add(2));
+
+        let hstr = HSTRING::from(voxis_id.as_str());
+        let raw_id = PCWSTR::from_raw(hstr.as_ptr());
+        let hr_console = set_default_endpoint(policy_ptr, raw_id, eConsole);
+        let _ = set_default_endpoint(policy_ptr, raw_id, eMultimedia);
+        let _ = set_default_endpoint(policy_ptr, raw_id, eCommunications);
+        release(policy_ptr);
+
+        hr_console.ok()
     }
 }
 
@@ -73,6 +128,9 @@ pub fn get_devices() -> Result<Vec<AudioDevice>> {
             let id_pwstr = unsafe { device.GetId() }.unwrap_or_default();
             let id = unsafe { id_pwstr.to_string() }.unwrap_or_default();
             let name = friendly_name(&device, i);
+            if is_voxis_virtual_mic(&name) {
+                continue;
+            }
 
             let detail = if default_id.as_deref() == Some(id.as_str()) {
                 "Default microphone".to_string()
@@ -92,8 +150,6 @@ pub fn get_devices() -> Result<Vec<AudioDevice>> {
     Ok(devices)
 }
 
-// shared so other modules (sessions, peak metering) can activate their own interface
-// off the device without each repeating this same default mic fallback
 pub fn get_device(device_id: &str) -> Result<IMMDevice> {
     if device_id.is_empty() {
         get_default_mic()
@@ -112,29 +168,8 @@ pub fn set_mute(device_id: &str, muted: bool) -> Result<()> {
     unsafe { vol.SetMute(muted, std::ptr::null()) }
 }
 
-pub fn set_volume(device_id: &str, level: f32) -> Result<()> {
-    let vol = endpoint_volume(device_id)?;
-    unsafe { vol.SetMasterVolumeLevelScalar(level, std::ptr::null()) }
-}
-
 pub fn get_mute(device_id: &str) -> Result<bool> {
     let vol = endpoint_volume(device_id)?;
     let muted = unsafe { vol.GetMute()? };
     Ok(muted.as_bool())
-}
-
-// windows gives this back as 0.0-1.0, not a percent
-pub fn get_volume_level(device_id: &str) -> Result<f32> {
-    let vol = endpoint_volume(device_id)?;
-    let level = unsafe { vol.GetMasterVolumeLevelScalar()? };
-    Ok(level)
-}
-
-// windows only updates the peak meter while another app is also capturing this device
-// a real capture based meter would be more accurate but is a bigger lift for later
-pub fn get_peak_level(device_id: &str) -> Result<f32> {
-    let device = get_device(device_id)?;
-    let meter: IAudioMeterInformation = unsafe { device.Activate(CLSCTX_ALL, None) }?;
-    let peak = unsafe { meter.GetPeakValue() }?;
-    Ok(peak)
 }

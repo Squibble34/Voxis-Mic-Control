@@ -6,9 +6,9 @@ use tauri::{AppHandle, Emitter};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
-use crate::audio;
+use crate::mic::MicFeed;
 
-const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300;
 
 pub struct MonitorState {
     device_id: Mutex<String>,
@@ -32,8 +32,7 @@ pub fn set_device(state: &MonitorState, device_id: String) {
     }
 }
 
-// lets other watchers (the meter poller) follow the same device without
-// keeping their own separate copy of which device is selected
+// lets the meter poller follow the selected device instead of keeping its own copy
 pub fn get_device(state: &MonitorState) -> String {
     state.device_id.lock().map(|g| g.clone()).unwrap_or_default()
 }
@@ -64,7 +63,7 @@ fn idle_seconds() -> Option<u64> {
     }
 }
 
-pub fn spawn_watcher(app: AppHandle, state: Arc<MonitorState>) {
+pub fn spawn_watcher(app: AppHandle, state: Arc<MonitorState>, feed: Arc<MicFeed>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
 
@@ -83,19 +82,13 @@ pub fn spawn_watcher(app: AppHandle, state: Arc<MonitorState>) {
             continue;
         }
 
-        match audio::get_mute(&device_id) {
-            Ok(true) => continue,
-            Ok(false) => {
-                log::info!("[idle] {idle}s idle, auto-muting");
-                if let Err(e) = audio::set_mute(&device_id, true) {
-                    log::error!("[idle] auto-mute failed: {e:?}");
-                    continue;
-                }
-                if let Err(e) = app.emit("auto-muted", ()) {
-                    log::error!("[idle] emit auto-muted failed: {e:?}");
-                }
-            }
-            Err(e) => log::error!("[idle] get_mute failed: {e:?}"),
+        if feed.is_muted() {
+            continue;
+        }
+        log::info!("[idle] {idle}s idle, auto-muting");
+        feed.set_muted(true);
+        if let Err(e) = app.emit("auto-muted", ()) {
+            log::error!("[idle] emit auto-muted failed: {e:?}");
         }
     });
 }

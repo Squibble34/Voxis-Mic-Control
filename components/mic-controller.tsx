@@ -2,6 +2,7 @@
 
 import * as React from "react"
 import {
+  AudioWaveform,
   Check,
   ChevronDown,
   Mic,
@@ -25,7 +26,14 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import { Slider } from "@/components/ui/slider"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { MIC_STATUS, type MicStatus } from "@/lib/mic-status"
+import type { NoiseEngineId } from "@/lib/settings-types"
 import { cn } from "@/lib/utils"
+
+const NOISE_ENGINES: { id: NoiseEngineId; label: string; hint: string }[] = [
+  { id: "off", label: "Off", hint: "" },
+  { id: "rnnoise", label: "RNNoise", hint: "Default, low latency" },
+  { id: "deepfilternet", label: "DeepFilterNet", hint: "Better voice isolation" },
+]
 
 export type Device = {
   id: string
@@ -43,6 +51,9 @@ export function MicController({
   onMutedChange,
   volume,
   onVolumeChange,
+  maxVolume = 100,
+  noiseEngine,
+  onNoiseEngineChange,
 }: {
   status: MicStatus
   devices: Device[]
@@ -52,14 +63,20 @@ export function MicController({
   onMutedChange: (muted: boolean) => void
   volume: number
   onVolumeChange: (volume: number) => void
+  maxVolume?: number
+  noiseEngine: NoiseEngineId
+  onNoiseEngineChange: (engine: NoiseEngineId) => void
 }) {
   const [menuOpen, setMenuOpen] = React.useState(false)
+  const [engineMenuOpen, setEngineMenuOpen] = React.useState(false)
   const [popKey, setPopKey] = React.useState(0)
 
   const descriptor = MIC_STATUS[status]
   const device = devices.find((d) => d.id === deviceId)
   const offline = descriptor.controlsDisabled
   const volumeLocked = offline || descriptor.volumeDisabled
+  const activeEngine =
+    NOISE_ENGINES.find((item) => item.id === noiseEngine) ?? NOISE_ENGINES[1]
 
   const VolumeIcon = muted || volume === 0 ? VolumeX : volume < 55 ? Volume1 : Volume2
 
@@ -201,6 +218,53 @@ export function MicController({
             )}
           </span>
         </div>
+
+        <DropdownMenu open={engineMenuOpen} onOpenChange={setEngineMenuOpen}>
+          <DropdownMenuTrigger
+            disabled={offline}
+            aria-label="Noise suppression engine"
+            className={cn(
+              "ml-auto flex shrink-0 items-center gap-1.5 self-start rounded-lg border px-2 py-1 text-xs font-medium transition-colors duration-200 outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-60",
+              !offline && noiseEngine !== "off"
+                ? "border-primary/35 bg-primary/10 text-primary hover:bg-primary/15"
+                : "border-border/70 bg-muted/50 text-muted-foreground hover:bg-muted/80 hover:text-foreground",
+            )}
+          >
+            <AudioWaveform className="size-3.5 shrink-0" />
+            <span>{activeEngine.label}</span>
+            <ChevronDown
+              className={cn(
+                "size-3 shrink-0 opacity-70 transition-transform duration-300 ease-out",
+                engineMenuOpen && "rotate-180",
+              )}
+            />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="text-[11px] tracking-wider uppercase">
+                Noise suppression
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {NOISE_ENGINES.map((item) => (
+                <DropdownMenuItem
+                  key={item.id}
+                  onClick={() => onNoiseEngineChange(item.id)}
+                  className="gap-2"
+                >
+                  <span className="flex min-w-0 flex-col">
+                    <span className="truncate">{item.label}</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      {item.hint}
+                    </span>
+                  </span>
+                  {item.id === noiseEngine && (
+                    <Check className="ml-auto size-3.5 text-primary" />
+                  )}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </CardHeader>
 
       <CardContent className="group/slider flex flex-col gap-2 px-3.5 py-3">
@@ -222,7 +286,7 @@ export function MicController({
           value={volumeLocked ? 0 : volume}
           onValueChange={(value) => onVolumeChange(value as number)}
           disabled={volumeLocked}
-          max={100}
+          max={maxVolume}
           step={1}
           aria-label="Input volume"
           className={cn(

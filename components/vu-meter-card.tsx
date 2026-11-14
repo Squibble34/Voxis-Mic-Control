@@ -1,7 +1,9 @@
 "use client"
 
 import * as React from "react"
+import { Headphones } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { AudioLinesIcon, type AudioLinesIconHandle } from "@/components/icons/audio-lines-icon"
 
@@ -13,11 +15,17 @@ export function VuMeterCard({
   disabled = false,
   level,
   reduceMotion = false,
+  listening = false,
+  onListeningChange,
+  talkingWhileMuted = false,
 }: {
   muted?: boolean
   disabled?: boolean
   level?: number
   reduceMotion?: boolean
+  listening?: boolean
+  onListeningChange?: (listening: boolean) => void
+  talkingWhileMuted?: boolean
 }) {
   const [simulatedLevel, setSimulatedLevel] = React.useState(0)
   const [peakLevel, setPeakLevel] = React.useState(0)
@@ -25,7 +33,7 @@ export function VuMeterCard({
   const audioLinesRef = React.useRef<AudioLinesIconHandle>(null)
 
   React.useEffect(() => {
-    if (level !== undefined || muted || disabled) {
+    if (level !== undefined || disabled) {
       setSimulatedLevel(0)
       return
     }
@@ -39,9 +47,9 @@ export function VuMeterCard({
     }
     raf = window.requestAnimationFrame(animate)
     return () => window.cancelAnimationFrame(raf)
-  }, [level, muted, disabled])
+  }, [level, disabled])
 
-  const activeLevel = disabled || muted ? 0 : level ?? simulatedLevel
+  const activeLevel = disabled ? 0 : level ?? simulatedLevel
   const filledSegments = Math.round((activeLevel / 100) * SEGMENT_COUNT)
 
   React.useEffect(() => {
@@ -53,7 +61,7 @@ export function VuMeterCard({
     }
   }, [filledSegments])
 
-  const statusLabel = disabled ? "--" : muted ? "Muted" : `${Math.round(activeLevel)}%`
+  const statusLabel = disabled ? "--" : `${Math.round(activeLevel)}%`
 
   return (
     <Card
@@ -71,14 +79,43 @@ export function VuMeterCard({
           <span
             className={cn(
               "flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-muted/50 text-muted-foreground transition-colors duration-300",
-              !disabled && !muted && activeLevel > 4 && "border-primary/40 bg-primary/10 text-primary",
+              !disabled && activeLevel > 4 && "border-primary/40 bg-primary/10 text-primary",
             )}
           >
             <AudioLinesIcon ref={audioLinesRef} size={14} className="shrink-0" />
           </span>
           <span className="min-w-0 flex-1 truncate text-xs font-medium tracking-wide text-muted-foreground">
-            Input level
+            {talkingWhileMuted ? (
+              <span className="text-warning font-semibold">Muted — speaking</span>
+            ) : (
+              "Input level"
+            )}
           </span>
+          {onListeningChange && (
+            <Tooltip>
+              <TooltipTrigger render={<span className="shrink-0" />}>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  aria-pressed={listening}
+                  aria-label={listening ? "Stop listening to microphone" : "Listen to microphone"}
+                  onClick={() => onListeningChange(!listening)}
+                  className={cn(
+                    "flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-medium transition-colors duration-200 outline-none focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50",
+                    listening
+                      ? "border-primary/40 bg-primary/15 text-primary hover:bg-primary/20"
+                      : "border-border/70 bg-muted/50 text-muted-foreground hover:bg-muted/80 hover:text-foreground",
+                  )}
+                >
+                  <Headphones className="size-3 shrink-0" />
+                  <span>{listening ? "Listening" : "Listen"}</span>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="top">
+                {listening ? "Stop hearing your processed mic" : "Hear your processed mic live"}
+              </TooltipContent>
+            </Tooltip>
+          )}
         </div>
 
         <div className="flex h-8 items-center justify-between gap-2">
@@ -106,7 +143,7 @@ export function VuMeterCard({
           <span
             className={cn(
               "inline-flex w-14 shrink-0 items-center justify-center rounded-md bg-muted/60 py-0.5 font-mono text-xs tabular-nums text-foreground/80",
-              (muted || disabled) && "text-muted-foreground",
+              disabled && "text-muted-foreground",
             )}
           >
             {statusLabel}

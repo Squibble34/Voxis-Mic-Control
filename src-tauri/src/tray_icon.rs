@@ -5,8 +5,7 @@ const SUPERSAMPLE: i32 = 4; // 4x4 samples per pixel for anti aliased edges
 const MUTED_RGB: (u8, u8, u8) = (239, 68, 68);
 const DEFAULT_RGB: (u8, u8, u8) = (79, 140, 255);
 
-// matches lucides own 24x24 viewbox so these numbers line up with the same
-// mic glyph used everywhere else in the app instead of a separately drawn shape
+// matches lucides 24x24 viewbox so the tray glyph lines up with the ui icons
 const GRID: f32 = 24.0;
 const STROKE_WIDTH: f32 = 2.0;
 
@@ -61,28 +60,19 @@ fn on_cradle_arc(x: f32, y: f32, cx: f32, cy: f32, radius: f32, half_width: f32)
     (dist - radius).abs() <= half_width
 }
 
-// draws the same mic glyph as the lucide Mic icon elsewhere in the app,
-// just rebuilt from raw shapes since a tray icon needs actual pixels not svg
+// rebuilt from raw shapes since a tray icon needs pixel buffers instead of svg
 fn on_mic_glyph(x: f32, y: f32) -> bool {
     let half = STROKE_WIDTH / 2.0;
 
-    // capsule head, vertical stadium from (12,5.5) to (12,12.2), radius 3
     let in_head = on_capsule_outline(x, y, 12.0, 5.5, 12.0, 12.2, 3.0, half);
-
-    // cradle arc, lower half of a circle centered (12,12), radius 7
     let in_arc = on_cradle_arc(x, y, 12.0, 12.0, 7.0, half);
-
-    // short verticals connecting the head to the arcs open ends
     let in_left_link = on_line(x, y, 5.0, 10.0, 5.0, 12.0, half);
     let in_right_link = on_line(x, y, 19.0, 10.0, 19.0, 12.0, half);
-
-    // stem below the arc
     let in_stem = on_line(x, y, 12.0, 19.0, 12.0, 22.0, half);
 
     in_head || in_arc || in_left_link || in_right_link || in_stem
 }
 
-// same corner to corner strike lucide draws for MicOff
 fn on_strike(x: f32, y: f32) -> bool {
     on_line(x, y, 2.0, 2.0, 22.0, 22.0, STROKE_WIDTH / 2.0 + 0.2)
 }

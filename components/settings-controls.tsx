@@ -17,7 +17,6 @@ import { Switch } from "@/components/ui/switch"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
-// splits on backtick pairs so changelog items can write `like this` for inline code
 function renderInlineText(text: string) {
   const parts = text.split(/(`[^`]+`)/g)
   return parts.map((part, index) =>
@@ -272,7 +271,7 @@ export function AccentColorRow({
   themeDefaultHex,
   onColorChange,
 }: {
-  // null means use the theme's built in default instead of a custom accent
+  // null means use the themes built in default instead of a custom accent
   color: string | null
   // the themes actual default, shown in the swatch when color is null
   themeDefaultHex: string
@@ -322,7 +321,6 @@ export function AccentColorRow({
   )
 }
 
-// click once to arm, click again to confirm, arms back down on its own after a few seconds
 export function ResetAllRow({ onConfirm }: { onConfirm?: () => void }) {
   const [confirming, setConfirming] = React.useState(false)
 
@@ -480,12 +478,14 @@ export function ActionRow({
   label,
   hint,
   buttonLabel,
+  buttonVariant = "outline",
   onAction,
   disabled,
 }: {
   label: string
   hint: string
   buttonLabel: string
+  buttonVariant?: "outline" | "default"
   onAction?: () => void
   disabled?: boolean
 }) {
@@ -498,7 +498,7 @@ export function ActionRow({
         <span className="text-xs leading-relaxed text-muted-foreground">{hint}</span>
       </div>
       <Button
-        variant="outline"
+        variant={buttonVariant}
         size="sm"
         disabled={disabled}
         onClick={onAction}

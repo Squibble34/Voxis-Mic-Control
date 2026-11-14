@@ -20,7 +20,7 @@ export function UpdateBanner({ currentVersion, version, notes, onDismiss }: Upda
     setError(null)
     try {
       await invoke("install_update")
-      // app restarts automatically on success — nothing to do here
+      // app restarts automatically on success so no cleanup needed
     } catch (e) {
       setError(String(e))
       setInstalling(false)

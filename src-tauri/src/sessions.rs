@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use windows::{
@@ -20,6 +21,14 @@ use crate::audio;
 // exe path > data url, icons never change for a given exe so we only extract once
 pub type IconCache = Mutex<HashMap<String, String>>;
 
+// wasapi keeps inactive session entries alive until the app exits, so we drop idle sessions after a short grace window
+const IDLE_GRACE_DURATION: Duration = Duration::from_secs(15);
+
+fn recent_active_pids() -> &'static Mutex<HashMap<u32, Instant>> {
+    static RECENT: OnceLock<Mutex<HashMap<u32, Instant>>> = OnceLock::new();
+    RECENT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[derive(Serialize, Clone)]
 pub struct TrackedAppInfo {
     pub id: String,
@@ -29,33 +38,68 @@ pub struct TrackedAppInfo {
 }
 
 pub fn get_capturing_sessions(device_id: &str, icon_cache: &IconCache) -> Result<Vec<TrackedAppInfo>> {
-    let device = audio::get_device(device_id)?;
-    let session_manager: IAudioSessionManager2 = unsafe { device.Activate(CLSCTX_ALL, None) }?;
-    let enumerator = unsafe { session_manager.GetSessionEnumerator() }?;
-    let count = unsafe { enumerator.GetCount() }?;
-
     let our_pid = unsafe { GetCurrentProcessId() };
-    let mut apps = Vec::new();
+    let now = Instant::now();
+    let mut pid_active: HashMap<u32, bool> = HashMap::new();
 
-    for i in 0..count {
-        let Ok(control) = (unsafe { enumerator.GetSession(i) }) else { continue };
-        let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+    let mut endpoint_ids = Vec::new();
+    if let Some(voxis_id) = audio::find_voxis_virtual_mic_id() {
+        endpoint_ids.push(voxis_id);
+    }
+    if !device_id.is_empty() && !endpoint_ids.iter().any(|id| id == device_id) {
+        endpoint_ids.push(device_id.to_string());
+    }
 
-        let pid = unsafe { control2.GetProcessId() }.unwrap_or(0);
-        if pid == 0 || pid == our_pid {
-            continue; // pid 0 is the system sounds session, skip that and our own process
+    for endpoint_id in endpoint_ids {
+        let Ok(device) = audio::get_device(&endpoint_id) else { continue };
+        let Ok(session_manager) = (unsafe { device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) }) else {
+            continue;
+        };
+        let Ok(enumerator) = (unsafe { session_manager.GetSessionEnumerator() }) else { continue };
+        let count = unsafe { enumerator.GetCount() }.unwrap_or(0);
+
+        for i in 0..count {
+            let Ok(control) = (unsafe { enumerator.GetSession(i) }) else { continue };
+            let Ok(control2) = control.cast::<IAudioSessionControl2>() else { continue };
+
+            let pid = unsafe { control2.GetProcessId() }.unwrap_or(0);
+            if pid == 0 || pid == our_pid {
+                continue; // pid 0 is the system sounds session, skip that and our own process
+            }
+
+            let state = unsafe { control2.GetState() }.unwrap_or(AudioSessionStateInactive);
+            let active = state == AudioSessionStateActive;
+            pid_active
+                .entry(pid)
+                .and_modify(|was_active| *was_active |= active)
+                .or_insert(active);
         }
+    }
 
-        let state = unsafe { control2.GetState() }.unwrap_or(AudioSessionStateInactive);
-        let active = state == AudioSessionStateActive;
+    let mut apps: Vec<TrackedAppInfo> = Vec::new();
+    let mut recent = recent_active_pids().lock().unwrap();
+    recent.retain(|_, last_seen| now.saturating_duration_since(*last_seen) <= IDLE_GRACE_DURATION);
+
+    for (pid, active) in pid_active {
+        if active {
+            recent.insert(pid, now);
+        } else if !recent.contains_key(&pid) {
+            continue;
+        }
 
         let Some(exe_path) = process_exe_path(pid) else { continue };
         let name = friendly_process_name(&exe_path);
         let icon = icon_data_url(&exe_path, icon_cache);
 
-        apps.push(TrackedAppInfo { id: pid.to_string(), name, active, icon });
+        apps.push(TrackedAppInfo {
+            id: pid.to_string(),
+            name,
+            active,
+            icon,
+        });
     }
 
+    apps.sort_by(|a, b| b.active.cmp(&a.active).then_with(|| a.name.cmp(&b.name)));
     Ok(apps)
 }
 
@@ -130,8 +174,7 @@ fn extract_icon_as_data_url(exe_path: &str) -> Option<String> {
     }
 }
 
-// gdi only gives us icons as an hicon, so we pull the raw bitmap out ourselves
-// and re-encode it as png by hand instead of using a higher level helper
+// gdi only gives us icons as an hicon, so pull the raw bitmap out and encode it as png by hand
 fn icon_to_png(hicon: HICON) -> Option<Vec<u8>> {
     unsafe {
         let mut icon_info = ICONINFO::default();

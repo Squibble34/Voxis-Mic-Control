@@ -3,12 +3,12 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-use crate::audio;
+use crate::mic::MicFeed;
 use crate::vad::{self, MonitorState};
 
-const POLL_INTERVAL_MS: u64 = 40; // 25Hz
+const POLL_INTERVAL_MS: u64 = 40;
 
-pub fn spawn_watcher(app: AppHandle, monitor_state: Arc<MonitorState>) {
+pub fn spawn_watcher(app: AppHandle, monitor_state: Arc<MonitorState>, feed: Arc<MicFeed>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
 
@@ -17,12 +17,8 @@ pub fn spawn_watcher(app: AppHandle, monitor_state: Arc<MonitorState>) {
             continue;
         }
 
-        match audio::get_peak_level(&device_id) {
-            Ok(level) => {
-                let percent = (level.clamp(0.0, 1.0) * 100.0).round() as u8;
-                let _ = app.emit("input-level-changed", percent);
-            }
-            Err(e) => log::error!("[meter] get_peak_level failed: {e:?}"),
-        }
+        let level = feed.take_peak_level();
+        let percent = (level.clamp(0.0, 1.0) * 100.0).round() as u8;
+        let _ = app.emit("input-level-changed", percent);
     });
 }

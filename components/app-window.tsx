@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { AudioWaveform } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { emit, listen } from "@tauri-apps/api/event"
 import { load, type Store } from "@tauri-apps/plugin-store"
@@ -26,16 +27,21 @@ import { MIC_STATUS, type MicStatus } from "@/lib/mic-status"
 import {
   DEFAULT_APPEARANCE_SETTINGS,
   DEFAULT_KEYBINDS_SETTINGS,
+  DEFAULT_NOISE_SETTINGS,
   DEFAULT_SYSTEM_SETTINGS,
   DEFAULT_WINDOWS_SETTINGS,
   getContrastForeground,
   THEME_PRIMARY_HEX,
   type AppearanceSettings,
   type KeybindsSettings,
+  type NoiseEngineId,
+  type NoiseSettings,
   type SystemSettings,
+  type VoiceToneId,
   type WindowsSettings,
 } from "@/lib/settings-types"
 import { useGlobalHotkey } from "@/lib/use-global-hotkey"
+import { playMuteSound, preloadMuteSounds } from "@/lib/mute-sound"
 import { useWindowSizeSync } from "@/lib/use-window-size-sync"
 
 const WINDOW_WIDTH = 644
@@ -53,25 +59,6 @@ function hslToHex(h: number, s: number, l: number): string {
   return `#${toHex(0)}${toHex(8)}${toHex(4)}`
 }
 
-function playMuteTone(nowMuted: boolean, volume: number) {
-  const peak = 0.15 * Math.max(0, Math.min(1, volume / 100))
-  if (peak <= 0.0001) return // fully silent, skip creating a context at all
-
-  const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-  const ctx = new AudioCtx()
-  const oscillator = ctx.createOscillator()
-  const gain = ctx.createGain()
-  oscillator.type = "sine"
-  oscillator.frequency.value = nowMuted ? 320 : 480
-  gain.gain.setValueAtTime(peak, ctx.currentTime)
-  gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12)
-  oscillator.connect(gain)
-  gain.connect(ctx.destination)
-  oscillator.start()
-  oscillator.stop(ctx.currentTime + 0.12)
-  oscillator.onended = () => ctx.close()
-}
-
 export function AppWindow() {
   const [activeView, setActiveView] = React.useState<AppView>("main")
   const [status, setStatus] = React.useState<MicStatus>("ready")
@@ -83,9 +70,11 @@ export function AppWindow() {
   const [volume, setVolume] = React.useState(0)
   const [muteError, setMuteError] = React.useState<string | null>(null)
 
-  // system settings, persisted via the settings store
   const [popupEnabled, setPopupEnabled] = React.useState(DEFAULT_SYSTEM_SETTINGS.popupEnabled)
   const [popupLocation, setPopupLocation] = React.useState(DEFAULT_SYSTEM_SETTINGS.popupLocation)
+  const [talkingWhileMutedPopup, setTalkingWhileMutedPopup] = React.useState(
+    DEFAULT_SYSTEM_SETTINGS.talkingWhileMutedPopup,
+  )
   const [soundEnabled, setSoundEnabled] = React.useState(DEFAULT_SYSTEM_SETTINGS.soundEnabled)
   const [soundVolume, setSoundVolume] = React.useState(DEFAULT_SYSTEM_SETTINGS.soundVolume)
   const [autoMuteEnabled, setAutoMuteEnabled] = React.useState(DEFAULT_SYSTEM_SETTINGS.autoMuteEnabled)
@@ -104,13 +93,13 @@ export function AppWindow() {
   function updateSystemSettings(patch: Partial<SystemSettings>) {
     if (patch.popupEnabled !== undefined) setPopupEnabled(patch.popupEnabled)
     if (patch.popupLocation !== undefined) setPopupLocation(patch.popupLocation)
+    if (patch.talkingWhileMutedPopup !== undefined) setTalkingWhileMutedPopup(patch.talkingWhileMutedPopup)
     if (patch.soundEnabled !== undefined) setSoundEnabled(patch.soundEnabled)
     if (patch.soundVolume !== undefined) setSoundVolume(patch.soundVolume)
     if (patch.autoMuteEnabled !== undefined) setAutoMuteEnabled(patch.autoMuteEnabled)
     if (patch.autoMuteMinutes !== undefined) setAutoMuteMinutes(patch.autoMuteMinutes)
   }
 
-  // appearance settings, persisted via the settings store
   const [theme, setTheme] = React.useState(DEFAULT_APPEARANCE_SETTINGS.theme)
   const [accentColor, setAccentColor] = React.useState(DEFAULT_APPEARANCE_SETTINGS.accentColor)
   const [reduceMotion, setReduceMotion] = React.useState(DEFAULT_APPEARANCE_SETTINGS.reduceMotion)
@@ -143,7 +132,6 @@ export function AppWindow() {
     document.documentElement.classList.toggle("reduce-motion", reduceMotion)
   }, [reduceMotion])
 
-  // keybinds settings, persisted via the settings store
   const [hotkeysEnabled, setHotkeysEnabled] = React.useState(DEFAULT_KEYBINDS_SETTINGS.hotkeysEnabled)
   const [hotkeyMode, setHotkeyMode] = React.useState(DEFAULT_KEYBINDS_SETTINGS.hotkeyMode)
   const [muteChord, setMuteChord] = React.useState(DEFAULT_KEYBINDS_SETTINGS.muteChord)
@@ -156,7 +144,6 @@ export function AppWindow() {
     if (patch.openAppChord !== undefined) setOpenAppChord(patch.openAppChord)
   }
 
-  // windows settings, persisted via the settings store
   const [launchAtStartup, setLaunchAtStartup] = React.useState(DEFAULT_WINDOWS_SETTINGS.launchAtStartup)
   const [startupState, setStartupState] = React.useState(DEFAULT_WINDOWS_SETTINGS.startupState)
   const [startupDelay, setStartupDelay] = React.useState(DEFAULT_WINDOWS_SETTINGS.startupDelay)
@@ -173,15 +160,70 @@ export function AppWindow() {
     if (patch.launchAtStartup !== undefined) setLaunchAtStartup(patch.launchAtStartup)
     if (patch.startupState !== undefined) setStartupState(patch.startupState)
     if (patch.startupDelay !== undefined) setStartupDelay(patch.startupDelay)
-      if (patch.minimizeToTrayOnClose !== undefined) setMinimizeToTrayOnClose(patch.minimizeToTrayOnClose)
-        if (patch.rememberWindowPosition !== undefined) setRememberWindowPosition(patch.rememberWindowPosition)
-        if (patch.alwaysOnTop !== undefined) setAlwaysOnTop(patch.alwaysOnTop)
-      }
+    if (patch.minimizeToTrayOnClose !== undefined) setMinimizeToTrayOnClose(patch.minimizeToTrayOnClose)
+    if (patch.rememberWindowPosition !== undefined) setRememberWindowPosition(patch.rememberWindowPosition)
+    if (patch.alwaysOnTop !== undefined) setAlwaysOnTop(patch.alwaysOnTop)
+  }
+
+  const [noiseEngine, setNoiseEngine] = React.useState<NoiseEngineId>(DEFAULT_NOISE_SETTINGS.engine)
+  const [attenLimDb, setAttenLimDb] = React.useState(DEFAULT_NOISE_SETTINGS.attenLimDb)
+  const [postFilterBeta, setPostFilterBeta] = React.useState(DEFAULT_NOISE_SETTINGS.postFilterBeta)
+  const [autoSetDefaultMic, setAutoSetDefaultMic] = React.useState(DEFAULT_NOISE_SETTINGS.autoSetDefaultMic)
+  const [volumeBoostEnabled, setVolumeBoostEnabled] = React.useState(
+    DEFAULT_NOISE_SETTINGS.volumeBoostEnabled,
+  )
+  const [highPassEnabled, setHighPassEnabled] = React.useState(
+    DEFAULT_NOISE_SETTINGS.highPassEnabled,
+  )
+  const [voiceTone, setVoiceTone] = React.useState<VoiceToneId>(DEFAULT_NOISE_SETTINGS.voiceTone)
+  const [noiseGateEnabled, setNoiseGateEnabled] = React.useState(
+    DEFAULT_NOISE_SETTINGS.noiseGateEnabled,
+  )
+  const [noiseGateThreshold, setNoiseGateThreshold] = React.useState(
+    DEFAULT_NOISE_SETTINGS.noiseGateThreshold,
+  )
+  const [compressorEnabled, setCompressorEnabled] = React.useState(
+    DEFAULT_NOISE_SETTINGS.compressorEnabled,
+  )
+  const [sidetoneEnabled, setSidetoneEnabled] = React.useState(false)
+
+  function updateNoiseSettings(patch: Partial<NoiseSettings>) {
+    if (patch.engine !== undefined) setNoiseEngine(patch.engine)
+    if (patch.attenLimDb !== undefined) setAttenLimDb(patch.attenLimDb)
+    if (patch.postFilterBeta !== undefined) setPostFilterBeta(patch.postFilterBeta)
+    if (patch.autoSetDefaultMic !== undefined) setAutoSetDefaultMic(patch.autoSetDefaultMic)
+    if (patch.volumeBoostEnabled !== undefined) setVolumeBoostEnabled(patch.volumeBoostEnabled)
+    if (patch.highPassEnabled !== undefined) setHighPassEnabled(patch.highPassEnabled)
+    if (patch.voiceTone !== undefined) setVoiceTone(patch.voiceTone)
+    if (patch.noiseGateEnabled !== undefined) setNoiseGateEnabled(patch.noiseGateEnabled)
+    if (patch.noiseGateThreshold !== undefined) setNoiseGateThreshold(patch.noiseGateThreshold)
+    if (patch.compressorEnabled !== undefined) setCompressorEnabled(patch.compressorEnabled)
+  }
+
+  function handleSidetoneChange(enabled: boolean) {
+    setSidetoneEnabled(enabled)
+    invoke("set_sidetone_enabled", { enabled }).catch(console.error)
+  }
+
+  React.useEffect(() => {
+    const turnOffSidetone = () => {
+      invoke("set_sidetone_enabled", { enabled: false }).catch(() => {})
+    }
+    window.addEventListener("beforeunload", turnOffSidetone)
+    return () => {
+      window.removeEventListener("beforeunload", turnOffSidetone)
+      turnOffSidetone()
+    }
+  }, [])
+
+  React.useEffect(() => {
+    preloadMuteSounds()
+  }, [])
 
   React.useEffect(() => {
     const unlistenPromise = listen("auto-muted", () => {
       setMuted(true)
-      if (soundEnabledRef.current) playMuteTone(true, soundVolumeRef.current)
+      if (soundEnabledRef.current) void playMuteSound(true, soundVolumeRef.current)
       emit("mute-changed", { muted: true }).catch(console.error)
     })
     return () => {
@@ -206,12 +248,51 @@ export function AppWindow() {
   }, [])
 
   const [inputLevel, setInputLevel] = React.useState<number | undefined>(undefined)
+  const [talkingWhileMuted, setTalkingWhileMuted] = React.useState(false)
+  const mutedSpeechTicksRef = React.useRef(0)
+  const lastMutedPopupTimeRef = React.useRef(0)
+  const clearTalkingTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const mutedRef = React.useRef(muted)
+  const talkingPopupEnabledRef = React.useRef(talkingWhileMutedPopup)
+  React.useEffect(() => {
+    mutedRef.current = muted
+    if (!muted) {
+      mutedSpeechTicksRef.current = 0
+      setTalkingWhileMuted(false)
+    }
+  }, [muted])
+  React.useEffect(() => {
+    talkingPopupEnabledRef.current = talkingWhileMutedPopup
+  }, [talkingWhileMutedPopup])
 
   React.useEffect(() => {
     const unlistenPromise = listen<number>("input-level-changed", (event) => {
-      setInputLevel(event.payload)
+      const level = event.payload
+      setInputLevel(level)
+
+      if (!mutedRef.current) return
+      if (level >= 18) {
+        mutedSpeechTicksRef.current += 1
+        if (clearTalkingTimeoutRef.current) clearTimeout(clearTalkingTimeoutRef.current)
+        clearTalkingTimeoutRef.current = setTimeout(() => {
+          mutedSpeechTicksRef.current = 0
+          setTalkingWhileMuted(false)
+        }, 1400)
+
+        if (mutedSpeechTicksRef.current >= 22) {
+          setTalkingWhileMuted(true)
+          const now = Date.now()
+          if (talkingPopupEnabledRef.current && now - lastMutedPopupTimeRef.current > 8000) {
+            lastMutedPopupTimeRef.current = now
+            emit("talking-while-muted").catch(console.error)
+          }
+        }
+      } else {
+        mutedSpeechTicksRef.current = Math.max(0, mutedSpeechTicksRef.current - 1)
+      }
     })
     return () => {
+      if (clearTalkingTimeoutRef.current) clearTimeout(clearTalkingTimeoutRef.current)
       unlistenPromise.then((unlisten) => unlisten())
     }
   }, [])
@@ -244,8 +325,25 @@ export function AppWindow() {
   const storeRef = React.useRef<Store | null>(null)
   const savedDeviceIdRef = React.useRef<string | null>(null)
   const [settingsReady, setSettingsReady] = React.useState(false)
+  const [devicesLoaded, setDevicesLoaded] = React.useState(false)
+  const [bootSplashVisible, setBootSplashVisible] = React.useState(true)
+  const [bootSplashMounted, setBootSplashMounted] = React.useState(true)
   // tracks the last time the user changed mute or volume so the background sync below doesnt fight a local change
   const lastLocalChange = React.useRef(0)
+
+  React.useEffect(() => {
+    if (!settingsReady || !devicesLoaded) return
+    const fadeTimer = window.setTimeout(() => {
+      setBootSplashVisible(false)
+    }, 180)
+    const unmountTimer = window.setTimeout(() => {
+      setBootSplashMounted(false)
+    }, 480)
+    return () => {
+      window.clearTimeout(fadeTimer)
+      window.clearTimeout(unmountTimer)
+    }
+  }, [settingsReady, devicesLoaded])
 
   const syncDeviceState = React.useCallback((id: string) => {
     if (!id) return
@@ -257,7 +355,6 @@ export function AppWindow() {
       .catch(console.error)
   }, [])
 
-  // loads persisted settings once, before device polling starts
   React.useEffect(() => {
     load("settings.json", { autoSave: false })
       .then((store) => {
@@ -268,14 +365,16 @@ export function AppWindow() {
           store.get<AppearanceSettings>("appearanceSettings"),
           store.get<KeybindsSettings>("keybindsSettings"),
           store.get<WindowsSettings>("windowsSettings"),
+          store.get<NoiseSettings>("noiseSettings"),
         ])
       })
-      .then(([savedDeviceId, savedSystemSettings, savedAppearanceSettings, savedKeybindsSettings, savedWindowsSettings]) => {
+      .then(([savedDeviceId, savedSystemSettings, savedAppearanceSettings, savedKeybindsSettings, savedWindowsSettings, savedNoiseSettings]) => {
         savedDeviceIdRef.current = savedDeviceId ?? null
 
         const system = { ...DEFAULT_SYSTEM_SETTINGS, ...savedSystemSettings }
         setPopupEnabled(system.popupEnabled)
         setPopupLocation(system.popupLocation)
+        setTalkingWhileMutedPopup(system.talkingWhileMutedPopup)
         setSoundEnabled(system.soundEnabled)
         setSoundVolume(system.soundVolume)
         setAutoMuteEnabled(system.autoMuteEnabled)
@@ -299,17 +398,29 @@ export function AppWindow() {
         setMinimizeToTrayOnClose(windows.minimizeToTrayOnClose)
         setRememberWindowPosition(windows.rememberWindowPosition)
         setAlwaysOnTop(windows.alwaysOnTop)
+
+        const noise = { ...DEFAULT_NOISE_SETTINGS, ...savedNoiseSettings }
+        setNoiseEngine(noise.engine)
+        setAttenLimDb(noise.attenLimDb)
+        setPostFilterBeta(noise.postFilterBeta)
+        setAutoSetDefaultMic(noise.autoSetDefaultMic)
+        setVolumeBoostEnabled(noise.volumeBoostEnabled)
+        setHighPassEnabled(noise.highPassEnabled)
+        setVoiceTone(noise.voiceTone)
+        setNoiseGateEnabled(noise.noiseGateEnabled)
+        setNoiseGateThreshold(noise.noiseGateThreshold)
+        setCompressorEnabled(noise.compressorEnabled)
       })
       .catch((err) => console.error("Failed to load settings:", err))
       .finally(() => setSettingsReady(true))
   }, [])
 
-  // persists system settings and pushes auto mute config to the rust watcher whenever any of these change, including right after the load above
   React.useEffect(() => {
     if (!settingsReady) return
     const system: SystemSettings = {
       popupEnabled,
       popupLocation,
+      talkingWhileMutedPopup,
       soundEnabled,
       soundVolume,
       autoMuteEnabled,
@@ -319,7 +430,16 @@ export function AppWindow() {
     storeRef.current?.save().catch(console.error)
     invoke("set_auto_mute_enabled", { enabled: autoMuteEnabled }).catch(console.error)
     invoke("set_auto_mute_idle_minutes", { minutes: autoMuteMinutes }).catch(console.error)
-  }, [settingsReady, popupEnabled, popupLocation, soundEnabled, soundVolume, autoMuteEnabled, autoMuteMinutes])
+  }, [
+    settingsReady,
+    popupEnabled,
+    popupLocation,
+    talkingWhileMutedPopup,
+    soundEnabled,
+    soundVolume,
+    autoMuteEnabled,
+    autoMuteMinutes,
+  ])
 
   React.useEffect(() => {
     if (!settingsReady) return
@@ -357,16 +477,57 @@ export function AppWindow() {
     alwaysOnTop,
   ])
 
-  // debounced, and only runs while remember window position is enabled
+  React.useEffect(() => {
+    if (!settingsReady) return
+    const noise: NoiseSettings = {
+      engine: noiseEngine,
+      attenLimDb,
+      postFilterBeta,
+      autoSetDefaultMic,
+      volumeBoostEnabled,
+      highPassEnabled,
+      voiceTone,
+      noiseGateEnabled,
+      noiseGateThreshold,
+      compressorEnabled,
+    }
+    storeRef.current?.set("noiseSettings", noise)
+    storeRef.current?.save().catch(console.error)
+    invoke("set_noise_engine", { engine: noiseEngine }).catch(console.error)
+    invoke("set_noise_atten_lim", { limDb: attenLimDb }).catch(console.error)
+    invoke("set_noise_post_filter", { beta: postFilterBeta }).catch(console.error)
+    invoke("set_auto_default_mic", { enabled: autoSetDefaultMic }).catch(console.error)
+    invoke("set_high_pass_enabled", { enabled: highPassEnabled }).catch(console.error)
+    invoke("set_voice_tone", { tone: voiceTone }).catch(console.error)
+    invoke("set_noise_gate_enabled", { enabled: noiseGateEnabled }).catch(console.error)
+    invoke("set_noise_gate_threshold", { threshold: noiseGateThreshold / 100.0 }).catch(console.error)
+    invoke("set_compressor_enabled", { enabled: compressorEnabled }).catch(console.error)
+  }, [
+    settingsReady,
+    noiseEngine,
+    attenLimDb,
+    postFilterBeta,
+    autoSetDefaultMic,
+    volumeBoostEnabled,
+    highPassEnabled,
+    voiceTone,
+    noiseGateEnabled,
+    noiseGateThreshold,
+    compressorEnabled,
+  ])
+
   React.useEffect(() => {
     if (!settingsReady || !rememberWindowPosition) return
 
     let debounceId: ReturnType<typeof setTimeout> | null = null
 
-    const unlistenPromise = getCurrentWindow().onMoved((position) => {
+    const unlistenPromise = getCurrentWindow().onMoved((event) => {
+      const { x, y } = event.payload
+      // windows reports -32000 when a window is minimized to the taskbar
+      if (x <= -10000 || y <= -10000) return
       if (debounceId) clearTimeout(debounceId)
       debounceId = setTimeout(() => {
-        storeRef.current?.set("windowPosition", { x: position.x, y: position.y })
+        storeRef.current?.set("windowPosition", { x, y })
         storeRef.current?.save().catch(console.error)
       }, 500)
     })
@@ -377,10 +538,8 @@ export function AppWindow() {
     }
   }, [settingsReady, rememberWindowPosition])
 
-  // isolated from the persist effect above, this is the only thing that should ever touch the os level
-  // autostart registration, and only when the toggle it corresponds to actually changes. checks the real
-  // os state first so it doesnt call disable() on something that isnt cleanly registered, which is what
-  // was throwing in dev mode
+  // kept out of the persist effect so unrelated windows settings never touch os autostart
+  // checks real os state before disabling since calling disable() unconditionally threw in dev mode
   React.useEffect(() => {
     if (!settingsReady) return
     ;(async () => {
@@ -415,8 +574,12 @@ export function AppWindow() {
   // the popup is a separate window and cant see this components state, so tell it about popup relevant changes over an event instead
   React.useEffect(() => {
     if (!settingsReady) return
-    emit("system-settings-changed", { popupEnabled, popupLocation }).catch(console.error)
-  }, [settingsReady, popupEnabled, popupLocation])
+    emit("system-settings-changed", {
+      popupEnabled,
+      popupLocation,
+      talkingWhileMutedPopup,
+    }).catch(console.error)
+  }, [settingsReady, popupEnabled, popupLocation, talkingWhileMutedPopup])
 
   React.useEffect(() => {
     if (!settingsReady) return
@@ -427,6 +590,7 @@ export function AppWindow() {
     invoke<Device[]>("get_audio_devices")
       .then((devs) => {
         setDevices(devs)
+        setDevicesLoaded(true)
 
         if (devs.length === 0) {
           setStatus("no-devices")
@@ -443,7 +607,6 @@ export function AppWindow() {
             setStatus("ready")
             invoke("set_monitor_device", { deviceId: target }).catch(console.error)
 
-            // mute on start, only runs on this first resolution and only if the device isnt already muted
             invoke<boolean>("get_mute_state", { deviceId: target })
               .then((isMuted) => {
                 if (!isMuted) {
@@ -480,7 +643,10 @@ export function AppWindow() {
           return currentId
         })
       })
-      .catch(console.error)
+      .catch((err) => {
+        console.error(err)
+        setDevicesLoaded(true)
+      })
   }, [syncDeviceState])
 
   // initial load then poll every 2s, windows doesnt push plug/unplug events to us here so we detect them by re-checking the device list
@@ -502,7 +668,7 @@ export function AppWindow() {
       .then(() => invoke<boolean>("get_mute_state", { deviceId }))
       .then((actual) => {
         setMuted(actual)
-        if (soundEnabledRef.current) playMuteTone(actual, soundVolumeRef.current)
+        if (soundEnabledRef.current) void playMuteSound(actual, soundVolumeRef.current)
         emit("mute-changed", { muted: actual }).catch(console.error)
       })
       .catch((err) => {
@@ -521,18 +687,28 @@ export function AppWindow() {
       setVolume(newVolume)
       if (volumeDebounce.current) clearTimeout(volumeDebounce.current)
       volumeDebounce.current = setTimeout(() => {
-        invoke("set_volume", { deviceId, level: newVolume / 100.0 }).catch(console.error)
+        const gain = newVolume / 100.0
+        invoke("set_volume", { deviceId, level: gain }).catch(console.error)
+        storeRef.current?.set("softwareGain", gain)
+        storeRef.current?.save().catch(console.error)
       }, 80)
     },
     [deviceId],
   )
+
+  React.useEffect(() => {
+    if (!settingsReady) return
+    if (!volumeBoostEnabled && volume > 100) {
+      handleVolumeChange(100)
+    }
+  }, [settingsReady, volumeBoostEnabled, volume, handleVolumeChange])
 
   const descriptor = MIC_STATUS[status]
 
   // registered once here regardless of which view is showing, switching to settings or anywhere else never unregisters these
   const { registerError: muteRegisterError } = useGlobalHotkey(
     muteChord,
-    hotkeysEnabled && !descriptor.controlsDisabled,
+    settingsReady && hotkeysEnabled && !descriptor.controlsDisabled,
     () => {
       if (hotkeyMode === "push-to-talk") {
         handleMutedChange(false)
@@ -545,14 +721,13 @@ export function AppWindow() {
       onRelease: () => handleMutedChange(true),
     },
   )
-  useGlobalHotkey(openAppChord, hotkeysEnabled, () => {
+  useGlobalHotkey(openAppChord, settingsReady && hotkeysEnabled, () => {
     const win = getCurrentWindow()
     win.show().then(() => win.unminimize()).then(() => win.setFocus()).catch(console.error)
   })
 
-  // switching hotkey mode resets to muted so push-to-talk always starts from its expected resting state.
-  // skips the very first run after settings load so restoring a saved push-to-talk mode on launch doesnt
-  // force an extra mute call
+  // switching hotkey mode mutes so push-to-talk starts from its resting state
+  // skip the initial load run so restoring a saved push-to-talk mode on startup doesnt force a mute
   const previousHotkeyModeRef = React.useRef(hotkeyMode)
   const hotkeyModeInitializedRef = React.useRef(false)
   React.useEffect(() => {
@@ -568,22 +743,24 @@ export function AppWindow() {
     }
   }, [settingsReady, hotkeyMode, handleMutedChange])
 
-  // fun mode (danger zone). intentionally not persisted, resets to off every launch, but lives here
-  // rather than in SettingsPanel so it keeps running when you leave settings instead of unmounting
-  // and snapping back to off
+  // kept here instead of settingspanel (and unpersisted) so toggling fun mode doesnt reset when you leave settings
   const [funModeUnlocked, setFunModeUnlocked] = React.useState(false)
   const [funModeEnabled, setFunModeEnabled] = React.useState(false)
   const [crazyColors, setCrazyColors] = React.useState(false)
   const [randomMute, setRandomMute] = React.useState(false)
   const [normalVolume, setNormalVolume] = React.useState(false)
+  const [funnyMic, setFunnyMic] = React.useState(false)
+
+  React.useEffect(() => {
+    invoke("set_funny_mic_enabled", { enabled: funModeEnabled && funnyMic }).catch(console.error)
+  }, [funModeEnabled, funnyMic])
 
   const accentColorRef = React.useRef(accentColor)
   React.useEffect(() => {
     accentColorRef.current = accentColor
   }, [accentColor])
 
-  // empty deps for a stable identity, otherwise the effect below gets torn down and restarted on every
-  // unrelated render, that was the flashing bug
+  // empty deps keep a stable identity so unrelated renders dont tear down the effect below and cause flashing
   const setAccentPreview = React.useCallback((hex: string | null) => {
     const root = document.documentElement
     const target = hex ?? accentColorRef.current
@@ -612,9 +789,7 @@ export function AppWindow() {
     }
   }, [crazyColors, setAccentPreview])
 
-  // refs so these two schedulers always call the current handler without needing it in a dependency array.
-  // handleMutedChange in particular gets a new identity on every real mute toggle, which would otherwise
-  // reset the random mute timer every time it actually fires
+  // refs stop handlemutedchange identity changes on each mute toggle from resetting the random mute timer
   const handleMutedChangeRef = React.useRef(handleMutedChange)
   React.useEffect(() => {
     handleMutedChangeRef.current = handleMutedChange
@@ -703,16 +878,38 @@ export function AppWindow() {
     statusBarRef,
     width: WINDOW_WIDTH,
     settingsHeight: SETTINGS_HEIGHT,
-    contentPaddingY: 24, // <main>'s p-3 adds 12px top and bottom that scrollHeight on the inner ref wont include
+    contentPaddingY: 24, // main has p-3 padding (24px total) that scrollheight on the inner ref wont include
     reduceMotion,
     viewKey: activeView,
   })
 
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-background">
+    <div className="relative flex h-full w-full flex-col overflow-hidden bg-background">
       <div ref={titleBarRef}>
         <TitleBar activeView={activeView} onViewChange={setActiveView} />
       </div>
+
+      {bootSplashMounted && (
+        <div
+          aria-hidden={!bootSplashVisible}
+          className={cn(
+            "absolute inset-x-0 top-[38px] bottom-0 z-50 flex flex-col items-center justify-center gap-3 bg-background transition-opacity duration-300 ease-out select-none",
+            bootSplashVisible ? "opacity-100" : "pointer-events-none opacity-0",
+          )}
+        >
+          <div className="relative flex size-14 items-center justify-center rounded-2xl border border-primary/35 bg-primary/10 text-primary shadow-[0_0_28px_-8px_var(--primary)]">
+            <AudioWaveform className="size-6 animate-pulse" />
+          </div>
+          <div className="flex flex-col items-center gap-1">
+            <span className="text-xs font-semibold tracking-[0.16em] text-foreground/90 uppercase">
+              Voxis
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              Initializing audio pipeline…
+            </span>
+          </div>
+        </div>
+      )}
 
       <main className="min-h-0 flex-1 overflow-y-auto p-3">
         <div
@@ -747,29 +944,33 @@ export function AppWindow() {
                 onMutedChange={handleMutedChange}
                 volume={volume}
                 onVolumeChange={handleVolumeChange}
+                maxVolume={volumeBoostEnabled ? 200 : 100}
+                noiseEngine={noiseEngine}
+                onNoiseEngineChange={(engine) => updateNoiseSettings({ engine })}
               />
-              {settingsReady && (
-                <div className="flex gap-3">
-                  <div className="flex-1">
+              <div className="flex gap-3">
+                <div className="flex-1">
                   <HotkeyCard
-                      disabled={!hotkeysEnabled || descriptor.controlsDisabled}
-                      chord={muteChord}
-                      onChordChange={setMuteChord}
-                      registerError={muteRegisterError}
-                      mode={hotkeyMode}
-                      onModeChange={(mode) => updateKeybindsSettings({ hotkeyMode: mode })}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <VuMeterCard
-                      muted={muted}
-                      disabled={descriptor.controlsDisabled}
-                      level={inputLevel}
-                      reduceMotion={reduceMotion}
-                    />
-                  </div>
+                    disabled={!hotkeysEnabled || descriptor.controlsDisabled}
+                    chord={muteChord}
+                    onChordChange={setMuteChord}
+                    registerError={muteRegisterError}
+                    mode={hotkeyMode}
+                    onModeChange={(mode) => updateKeybindsSettings({ hotkeyMode: mode })}
+                  />
                 </div>
-              )}
+                <div className="flex-1">
+                  <VuMeterCard
+                    muted={muted}
+                    disabled={descriptor.controlsDisabled}
+                    level={inputLevel}
+                    reduceMotion={reduceMotion}
+                    listening={sidetoneEnabled}
+                    onListeningChange={handleSidetoneChange}
+                    talkingWhileMuted={talkingWhileMuted}
+                  />
+                </div>
+              </div>
               <AppTrackerCard apps={trackedApps} />
             </div>
           ) : (
@@ -777,6 +978,7 @@ export function AppWindow() {
               systemSettings={{
                 popupEnabled,
                 popupLocation,
+                talkingWhileMutedPopup,
                 soundEnabled,
                 soundVolume,
                 autoMuteEnabled,
@@ -796,6 +998,19 @@ export function AppWindow() {
                 alwaysOnTop,
               }}
               onWindowsSettingsChange={updateWindowsSettings}
+              noiseSettings={{
+                engine: noiseEngine,
+                attenLimDb,
+                postFilterBeta,
+                autoSetDefaultMic,
+                volumeBoostEnabled,
+                highPassEnabled,
+                voiceTone,
+                noiseGateEnabled,
+                noiseGateThreshold,
+                compressorEnabled,
+              }}
+              onNoiseSettingsChange={updateNoiseSettings}
               funModeUnlocked={funModeUnlocked}
               onFunModeUnlockedChange={setFunModeUnlocked}
               funModeEnabled={funModeEnabled}
@@ -806,6 +1021,10 @@ export function AppWindow() {
               onRandomMuteChange={setRandomMute}
               normalVolume={normalVolume}
               onNormalVolumeChange={setNormalVolume}
+              funnyMic={funnyMic}
+              onFunnyMicChange={setFunnyMic}
+              pendingUpdate={pendingUpdate}
+              onPendingUpdateChange={setPendingUpdate}
             />
           )}
         </div>

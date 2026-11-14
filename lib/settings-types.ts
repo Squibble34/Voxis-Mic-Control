@@ -1,6 +1,7 @@
 export type SystemSettings = {
   popupEnabled: boolean
   popupLocation: string
+  talkingWhileMutedPopup: boolean
   soundEnabled: boolean
   soundVolume: number
   autoMuteEnabled: boolean
@@ -10,6 +11,7 @@ export type SystemSettings = {
 export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   popupEnabled: true,
   popupLocation: "top-right",
+  talkingWhileMutedPopup: true,
   soundEnabled: true,
   soundVolume: 70,
   autoMuteEnabled: true,
@@ -18,7 +20,7 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
 
 export type AppearanceSettings = {
   theme: "dark" | "light"
-  // null means use the theme's built in default instead of a custom accent
+  // null means use the themes built in default instead of a custom accent
   accentColor: string | null
   reduceMotion: boolean
 }
@@ -35,7 +37,6 @@ export const THEME_PRIMARY_HEX: Record<AppearanceSettings["theme"], string> = {
   light: "#00919d",
 }
 
-// simple luminance check to pick readable foreground text for an arbitrary accent color
 export function getContrastForeground(hex: string): string {
   const clean = hex.replace("#", "")
   const r = parseInt(clean.substring(0, 2), 16) / 255
@@ -75,4 +76,33 @@ export const DEFAULT_WINDOWS_SETTINGS: WindowsSettings = {
   minimizeToTrayOnClose: true,
   rememberWindowPosition: true,
   alwaysOnTop: false,
+}
+
+export type NoiseEngineId = "off" | "rnnoise" | "deepfilternet"
+export type VoiceToneId = "natural" | "warm" | "crisp"
+
+export type NoiseSettings = {
+  engine: NoiseEngineId
+  attenLimDb: number
+  postFilterBeta: number
+  autoSetDefaultMic: boolean
+  volumeBoostEnabled: boolean
+  highPassEnabled: boolean
+  voiceTone: VoiceToneId
+  noiseGateEnabled: boolean
+  noiseGateThreshold: number
+  compressorEnabled: boolean
+}
+
+export const DEFAULT_NOISE_SETTINGS: NoiseSettings = {
+  engine: "rnnoise",
+  attenLimDb: 100,
+  postFilterBeta: 0,
+  autoSetDefaultMic: true,
+  volumeBoostEnabled: false,
+  highPassEnabled: false,
+  voiceTone: "natural",
+  noiseGateEnabled: false,
+  noiseGateThreshold: 6,
+  compressorEnabled: false,
 }

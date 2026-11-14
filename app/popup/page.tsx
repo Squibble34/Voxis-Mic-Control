@@ -5,6 +5,7 @@ import { MicIcon, type MicIconHandle } from "@/components/icons/mic-icon"
 import { MicOffIcon, type MicOffIconHandle } from "@/components/icons/mic-off-icon"
 import { getCurrentWindow, primaryMonitor } from "@tauri-apps/api/window"
 import { LogicalPosition } from "@tauri-apps/api/dpi"
+import { invoke } from "@tauri-apps/api/core"
 import { listen } from "@tauri-apps/api/event"
 import { load } from "@tauri-apps/plugin-store"
 import { Card } from "@/components/ui/card"
@@ -24,14 +25,17 @@ const FADE_MS = 200
 
 export default function PopupPage() {
   const [muted, setMuted] = React.useState(false)
+  const [warning, setWarning] = React.useState(false)
   const [visible, setVisible] = React.useState(false)
   const [popKey, setPopKey] = React.useState(0)
   const hideTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const fadeTimeout = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastLocation = React.useRef<string | null>(null)
   const micRef = React.useRef<MicIconHandle>(null)
   const micOffRef = React.useRef<MicOffIconHandle>(null)
   const popupEnabledRef = React.useRef(DEFAULT_SYSTEM_SETTINGS.popupEnabled)
   const popupLocationRef = React.useRef(DEFAULT_SYSTEM_SETTINGS.popupLocation)
+  const talkingWhileMutedPopupRef = React.useRef(DEFAULT_SYSTEM_SETTINGS.talkingWhileMutedPopup)
   const reduceMotionRef = React.useRef(DEFAULT_APPEARANCE_SETTINGS.reduceMotion)
 
   function applyAppearance(appearance: AppearanceSettings) {
@@ -61,18 +65,25 @@ export default function PopupPage() {
         if (savedSystem) {
           popupEnabledRef.current = savedSystem.popupEnabled
           popupLocationRef.current = savedSystem.popupLocation
+          if (savedSystem.talkingWhileMutedPopup !== undefined) {
+            talkingWhileMutedPopupRef.current = savedSystem.talkingWhileMutedPopup
+          }
         }
         applyAppearance({ ...DEFAULT_APPEARANCE_SETTINGS, ...savedAppearance })
       })
       .catch((err) => console.error("Failed to load popup settings:", err))
 
-    const unlistenSystemPromise = listen<{ popupEnabled: boolean; popupLocation: string }>(
-      "system-settings-changed",
-      (event) => {
-        popupEnabledRef.current = event.payload.popupEnabled
-        popupLocationRef.current = event.payload.popupLocation
-      },
-    )
+    const unlistenSystemPromise = listen<{
+      popupEnabled: boolean
+      popupLocation: string
+      talkingWhileMutedPopup?: boolean
+    }>("system-settings-changed", (event) => {
+      popupEnabledRef.current = event.payload.popupEnabled
+      popupLocationRef.current = event.payload.popupLocation
+      if (event.payload.talkingWhileMutedPopup !== undefined) {
+        talkingWhileMutedPopupRef.current = event.payload.talkingWhileMutedPopup
+      }
+    })
     const unlistenAppearancePromise = listen<AppearanceSettings>(
       "appearance-settings-changed",
       (event) => applyAppearance(event.payload),
@@ -111,13 +122,15 @@ export default function PopupPage() {
     const unlistenPromise = listen<{ muted: boolean }>("mute-changed", async (event) => {
       if (!popupEnabledRef.current) return
       if (hideTimeout.current) clearTimeout(hideTimeout.current)
+      if (fadeTimeout.current) clearTimeout(fadeTimeout.current)
 
       if (lastLocation.current !== popupLocationRef.current) {
         await positionFor(popupLocationRef.current)
       }
+      setWarning(false)
       setMuted(event.payload.muted)
       setPopKey((k) => k + 1)
-      await win.show()
+      await invoke("show_popup_topmost").catch(() => win.show())
       requestAnimationFrame(() => {
         setVisible(true)
         if (reduceMotionRef.current) return
@@ -130,13 +143,40 @@ export default function PopupPage() {
 
       hideTimeout.current = setTimeout(() => {
         setVisible(false)
-        setTimeout(() => win.hide(), FADE_MS)
+        fadeTimeout.current = setTimeout(() => win.hide(), FADE_MS)
+      }, VISIBLE_MS)
+    })
+
+    const unlistenTalkingPromise = listen("talking-while-muted", async () => {
+      if (!talkingWhileMutedPopupRef.current) return
+      if (hideTimeout.current) clearTimeout(hideTimeout.current)
+      if (fadeTimeout.current) clearTimeout(fadeTimeout.current)
+
+      if (lastLocation.current !== popupLocationRef.current) {
+        await positionFor(popupLocationRef.current)
+      }
+      setWarning(true)
+      setMuted(true)
+      setPopKey((k) => k + 1)
+      await invoke("show_popup_topmost").catch(() => win.show())
+      requestAnimationFrame(() => {
+        setVisible(true)
+        if (!reduceMotionRef.current) {
+          micOffRef.current?.startAnimation()
+        }
+      })
+
+      hideTimeout.current = setTimeout(() => {
+        setVisible(false)
+        fadeTimeout.current = setTimeout(() => win.hide(), FADE_MS)
       }, VISIBLE_MS)
     })
 
     return () => {
       unlistenPromise.then((unlisten) => unlisten())
+      unlistenTalkingPromise.then((unlisten) => unlisten())
       if (hideTimeout.current) clearTimeout(hideTimeout.current)
+      if (fadeTimeout.current) clearTimeout(fadeTimeout.current)
     }
   }, [])
 
@@ -148,13 +188,19 @@ export default function PopupPage() {
       className={cn(
         "flex size-16 items-center justify-center rounded-2xl border-2 bg-card py-0 transition-all duration-200 ease-out",
         visible ? "scale-100 opacity-100" : "scale-90 opacity-0",
-        muted
-        ? "border-destructive/50 shadow-[0_0_10px_1px_color-mix(in_oklch,var(--destructive)_45%,transparent)]"
-          : cn("border-primary/50", !reduceMotionRef.current && "animate-pulse-once"),
+        warning
+          ? "border-warning/60 shadow-[0_0_12px_1px_color-mix(in_oklch,var(--warning)_50%,transparent)]"
+          : muted
+            ? "border-destructive/50 shadow-[0_0_10px_1px_color-mix(in_oklch,var(--destructive)_45%,transparent)]"
+            : cn("border-primary/50", !reduceMotionRef.current && "animate-pulse-once"),
       )}
     >
         {muted ? (
-          <MicOffIcon ref={micOffRef} size={28} className="text-destructive" />
+          <MicOffIcon
+            ref={micOffRef}
+            size={28}
+            className={warning ? "text-warning" : "text-destructive"}
+          />
         ) : (
           <MicIcon ref={micRef} size={28} className="text-primary" />
         )}

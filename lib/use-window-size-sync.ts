@@ -10,8 +10,7 @@ function easeOutCubic(t: number) {
   return 1 - Math.pow(1 - t, 3)
 }
 
-// settings view uses one fixed height set once on entry with no observer, so switching sidebar
-// sections can never re-trigger a resize like the main view does
+// settings view sets one fixed height on entry with no observer so switching sidebar sections never re-triggers a resize
 export function useWindowSizeSync({
   titleBarRef,
   contentRef,

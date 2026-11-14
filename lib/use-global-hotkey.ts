@@ -1,11 +1,19 @@
 "use client"
 
 import * as React from "react"
-import { register, unregister } from "@tauri-apps/plugin-global-shortcut"
+import { isRegistered, register, unregister } from "@tauri-apps/plugin-global-shortcut"
 
 type HotkeyMode = "toggle" | "push-to-talk"
 
-// unmounting this hook unregisters the shortcut, so it needs to live in something that stays mounted for the app's whole lifetime
+// serializes all shortcut register/unregister calls across strict-mode remounts and state updates so two async calls never race
+let shortcutQueue: Promise<void> = Promise.resolve()
+
+function enqueueShortcutOp(op: () => Promise<void>): Promise<void> {
+  shortcutQueue = shortcutQueue.then(op, op)
+  return shortcutQueue
+}
+
+// unmounting this hook unregisters the shortcut, so it needs to live in something that stays mounted for the apps whole lifetime
 export function useGlobalHotkey(
   chord: string[],
   enabled: boolean,
@@ -40,9 +48,12 @@ export function useGlobalHotkey(
     let lastFired = 0
     heldRef.current = false
 
-    const setupShortcut = async () => {
+    enqueueShortcutOp(async () => {
+      if (cancelled) return
       try {
-        await unregister(shortcutStr).catch(() => {})
+        if (await isRegistered(shortcutStr).catch(() => false)) {
+          await unregister(shortcutStr).catch(() => {})
+        }
         if (cancelled) return
         await register(shortcutStr, (event) => {
           if (mode === "push-to-talk") {
@@ -70,14 +81,16 @@ export function useGlobalHotkey(
           setRegisterError(true)
         }
       }
-    }
-
-    setupShortcut()
+    })
 
     return () => {
       cancelled = true
       heldRef.current = false
-      unregister(shortcutStr).catch(() => {})
+      enqueueShortcutOp(async () => {
+        if (await isRegistered(shortcutStr).catch(() => false)) {
+          await unregister(shortcutStr).catch(() => {})
+        }
+      })
     }
   }, [chord, enabled, mode])
 

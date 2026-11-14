@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Voxis Mic Control",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "identifier": "com.voxis.miccontrol",
   "build": {
     "frontendDist": "../out",
@@ -15,7 +15,7 @@
         "label": "main",
         "title": "Voxis Mic Control",
         "width": 644,
-        "height": 552,
+        "height": 404,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,
@@ -51,6 +51,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "nsis/hooks.nsh"
+      }
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }
