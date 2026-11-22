@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
@@ -14,6 +14,7 @@ pub struct MonitorState {
     device_id: Mutex<String>,
     enabled: AtomicBool,
     idle_timeout_secs: AtomicU64,
+    talking_popup_enabled: AtomicBool,
 }
 
 impl Default for MonitorState {
@@ -22,8 +23,17 @@ impl Default for MonitorState {
             device_id: Mutex::new(String::new()),
             enabled: AtomicBool::new(true),
             idle_timeout_secs: AtomicU64::new(DEFAULT_IDLE_TIMEOUT_SECS),
+            talking_popup_enabled: AtomicBool::new(true),
         }
     }
+}
+
+pub fn set_talking_popup_enabled(state: &MonitorState, enabled: bool) {
+    state.talking_popup_enabled.store(enabled, Ordering::Relaxed);
+}
+
+pub fn talking_popup_enabled(state: &MonitorState) -> bool {
+    state.talking_popup_enabled.load(Ordering::Relaxed)
 }
 
 pub fn set_device(state: &MonitorState, device_id: String) {
@@ -76,7 +86,14 @@ pub fn spawn_watcher(app: AppHandle, state: Arc<MonitorState>, feed: Arc<MicFeed
             continue;
         }
 
-        let Some(idle) = idle_seconds() else { continue };
+        let Some(input_idle) = idle_seconds() else { continue };
+        let last_speech = feed.last_speech_ms();
+        let idle = if last_speech > 0 {
+            let speech_idle = crate::mic::monotonic_ms().saturating_sub(last_speech) / 1000;
+            input_idle.min(speech_idle)
+        } else {
+            input_idle
+        };
         let timeout = state.idle_timeout_secs.load(Ordering::Relaxed);
         if idle < timeout {
             continue;
@@ -86,9 +103,6 @@ pub fn spawn_watcher(app: AppHandle, state: Arc<MonitorState>, feed: Arc<MicFeed
             continue;
         }
         log::info!("[idle] {idle}s idle, auto-muting");
-        feed.set_muted(true);
-        if let Err(e) = app.emit("auto-muted", ()) {
-            log::error!("[idle] emit auto-muted failed: {e:?}");
-        }
+        crate::apply_mute_change(&app, true);
     });
 }

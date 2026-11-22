@@ -6,6 +6,40 @@ export type ChangelogEntry = {
   
   export const CHANGELOG: ChangelogEntry[] = [
     {
+      version: "2.1.0",
+      date: "Nov 22, 2026",
+      sections: [
+        {
+          label: "Added",
+          items: [
+            "`Profiles` section to save presets, import/export settings, and auto switch profiles by app",
+            "Persistent mute state overlay at the top of the screen",
+            "Tray menu shortcuts for mute, persistent pill, and input device switching",
+            "Support for mouse side buttons (`Mouse3`-`Mouse5`) and single key hotkeys like `CapsLock`",
+            "`Install later` option on updates to install automatically on next reopen",
+            "Virtual mic driver diagnostics in `Maintenance` and a warning banner, retry/install button if USBip is missing",
+          ],
+        },
+        {
+          label: "Changed",
+          items: [
+            "Status bar now shows the app version when ready and warns if the virtual mic driver has an issue",
+            "Moved mute popups, sound cues, and tray idle mode to run natively for lower background resource usage",
+            "Improved talking while muted and auto mute accuracy using speech detection",
+          ],
+        },
+        {
+          label: "Fixed",
+          items: [
+            "Fixed USBip driver failing to download and install automatically",
+            "Fixed `usbip.exe` application error popups when shutting down Windows",
+            "Fixed window sizing glitches when minimizing, restoring, or switching views",
+            "Fixed startup and tray close errors",
+          ],
+        },
+      ],
+    },
+    {
       version: "2.0.0",
       date: "Nov 14, 2026",
       sections: [

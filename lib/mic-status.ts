@@ -103,14 +103,20 @@ export const HOTKEY_ISSUE: Record<HotkeyIssue, string | null> = {
 const RESERVED = new Set(["Win+L", "Win+Tab", "Ctrl+Alt+Delete", "Win+G"])
 const TAKEN = new Set(["Ctrl+Shift+M", "Alt+F4", "Ctrl+Shift+Escape"])
 
-export function validateChord(chord: string[]): HotkeyIssue {
+export function validateChord(
+  chord: string[],
+  mode: "toggle" | "push-to-talk" = "toggle",
+): HotkeyIssue {
   const combo = chord.join("+")
   if (RESERVED.has(combo)) return "reserved"
   if (TAKEN.has(combo)) return "conflict"
+  if (mode === "push-to-talk") return "none"
 
-  const modifiers = chord.filter((key) => ["Ctrl", "Alt", "Shift", "Win"].includes(key))
-  const bare = chord.filter((key) => !["Ctrl", "Alt", "Shift", "Win"].includes(key))
-  const isTypingKey = bare.some((key) => key.length === 1 || key === "Space")
+  const modifiers = chord.filter((key) => ["Ctrl", "Alt", "Shift", "Win", "Super"].includes(key))
+  const bare = chord.filter((key) => !["Ctrl", "Alt", "Shift", "Win", "Super"].includes(key))
+  const isTypingKey = bare.some(
+    (key) => (key.length === 1 && !key.startsWith("Mouse")) || key === "Space",
+  )
 
   if (modifiers.length === 0 && isTypingKey) return "needs-modifier"
   return "none"

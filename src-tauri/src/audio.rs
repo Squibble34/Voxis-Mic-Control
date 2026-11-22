@@ -1,6 +1,11 @@
+use std::sync::mpsc;
+use std::time::Duration;
+
 use serde::Serialize;
+use tauri::Emitter;
 use windows::{
     core::*,
+    Win32::Foundation::PROPERTYKEY,
     Win32::Media::Audio::*,
     Win32::Media::Audio::Endpoints::IAudioEndpointVolume,
     Win32::System::Com::*,
@@ -10,7 +15,7 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct AudioDevice {
     pub id: String,
     pub name: String,
@@ -172,4 +177,64 @@ pub fn get_mute(device_id: &str) -> Result<bool> {
     let vol = endpoint_volume(device_id)?;
     let muted = unsafe { vol.GetMute()? };
     Ok(muted.as_bool())
+}
+
+#[implement(IMMNotificationClient)]
+struct DeviceNotificationClient {
+    tx: mpsc::Sender<()>,
+}
+
+impl IMMNotificationClient_Impl for DeviceNotificationClient_Impl {
+    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: DEVICE_STATE) -> Result<()> {
+        let _ = self.tx.send(());
+        Ok(())
+    }
+
+    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> Result<()> {
+        let _ = self.tx.send(());
+        Ok(())
+    }
+
+    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> Result<()> {
+        let _ = self.tx.send(());
+        Ok(())
+    }
+
+    fn OnDefaultDeviceChanged(
+        &self,
+        flow: EDataFlow,
+        _role: ERole,
+        _pwstrdefaultdeviceid: &PCWSTR,
+    ) -> Result<()> {
+        if flow == eCapture {
+            let _ = self.tx.send(());
+        }
+        Ok(())
+    }
+
+    fn OnPropertyValueChanged(&self, _pwstrdeviceid: &PCWSTR, _key: &PROPERTYKEY) -> Result<()> {
+        Ok(())
+    }
+}
+
+pub fn spawn_device_watcher(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let _ = initialize_com();
+        let Ok(enumerator) = get_device_enumerator() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel::<()>();
+        let client: IMMNotificationClient = DeviceNotificationClient { tx }.into();
+        if unsafe { enumerator.RegisterEndpointNotificationCallback(&client) }.is_err() {
+            return;
+        }
+
+        while rx.recv().is_ok() {
+            // coalesce burst of plug/unplug events before enumerating endpoints
+            while rx.recv_timeout(Duration::from_millis(250)).is_ok() {}
+            let devices = get_devices().unwrap_or_default();
+            crate::sync_tray_devices(&app, devices.clone());
+            let _ = app.emit("audio-devices-changed", devices);
+        }
+    });
 }

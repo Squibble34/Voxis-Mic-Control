@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { invoke } from "@tauri-apps/api/core"
 import { Pencil, RotateCcw, X } from "lucide-react"
 import type { ChangelogEntry } from "@/lib/changelog"
 
@@ -406,14 +407,48 @@ export function HotkeyRow({
       setListening(false)
     }
 
+    function handleMouseDown(event: MouseEvent) {
+      const mouseName =
+        event.button === 1
+          ? "Mouse3"
+          : event.button === 3
+            ? "Mouse4"
+            : event.button === 4
+              ? "Mouse5"
+              : null
+      if (!mouseName) return
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      const parts: string[] = []
+      if (event.ctrlKey) parts.push("Ctrl")
+      if (event.altKey) parts.push("Alt")
+      if (event.shiftKey) parts.push("Shift")
+      if (event.metaKey) parts.push("Super")
+      parts.push(mouseName)
+      onChordChange?.(parts)
+      setListening(false)
+    }
+
+    function preventAuxNavigation(event: MouseEvent) {
+      if (event.button === 1 || event.button === 3 || event.button === 4) {
+        event.preventDefault()
+      }
+    }
+
     function handleBlur() {
       setListening(false)
     }
 
     window.addEventListener("keydown", handleKeyDown)
+    window.addEventListener("mousedown", handleMouseDown, true)
+    window.addEventListener("auxclick", preventAuxNavigation, true)
     window.addEventListener("blur", handleBlur)
     return () => {
       window.removeEventListener("keydown", handleKeyDown)
+      window.removeEventListener("mousedown", handleMouseDown, true)
+      window.removeEventListener("auxclick", preventAuxNavigation, true)
       window.removeEventListener("blur", handleBlur)
     }
   }, [listening, onChordChange])
@@ -421,6 +456,15 @@ export function HotkeyRow({
   React.useEffect(() => {
     if (disabled) setListening(false)
   }, [disabled])
+
+  React.useEffect(() => {
+    invoke("set_hotkeys_paused", { paused: listening }).catch(() => {})
+    return () => {
+      if (listening) {
+        invoke("set_hotkeys_paused", { paused: false }).catch(() => {})
+      }
+    }
+  }, [listening])
 
   return (
     <div className={cn("group/row flex items-center justify-between gap-4", disabled && "opacity-50")}>
@@ -481,6 +525,9 @@ export function ActionRow({
   buttonVariant = "outline",
   onAction,
   disabled,
+  secondaryButtonLabel,
+  onSecondaryAction,
+  secondaryDisabled,
 }: {
   label: string
   hint: string
@@ -488,24 +535,40 @@ export function ActionRow({
   buttonVariant?: "outline" | "default"
   onAction?: () => void
   disabled?: boolean
+  secondaryButtonLabel?: string
+  onSecondaryAction?: () => void
+  secondaryDisabled?: boolean
 }) {
   return (
-    <div className={cn("group/row flex items-center justify-between gap-4", disabled && "opacity-50")}>
+    <div className={cn("group/row flex items-center justify-between gap-4", disabled && !secondaryButtonLabel && "opacity-50")}>
       <div className="flex min-w-0 flex-col gap-0.5">
         <span className="text-[13px] font-medium text-foreground transition-colors duration-200 group-hover/row:text-primary">
           {label}
         </span>
         <span className="text-xs leading-relaxed text-muted-foreground">{hint}</span>
       </div>
-      <Button
-        variant={buttonVariant}
-        size="sm"
-        disabled={disabled}
-        onClick={onAction}
-        className="shrink-0 transition-transform duration-200 hover:-translate-y-px"
-      >
-        {buttonLabel}
-      </Button>
+      <div className="flex shrink-0 items-center gap-2">
+        {secondaryButtonLabel && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={secondaryDisabled}
+            onClick={onSecondaryAction}
+            className="shrink-0 transition-transform duration-200 hover:-translate-y-px"
+          >
+            {secondaryButtonLabel}
+          </Button>
+        )}
+        <Button
+          variant={buttonVariant}
+          size="sm"
+          disabled={disabled}
+          onClick={onAction}
+          className="shrink-0 transition-transform duration-200 hover:-translate-y-px"
+        >
+          {buttonLabel}
+        </Button>
+      </div>
     </div>
   )
 }

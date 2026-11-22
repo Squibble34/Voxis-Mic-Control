@@ -37,7 +37,32 @@ pub struct TrackedAppInfo {
     pub icon: Option<String>,
 }
 
+#[cfg(dev)]
+static MOCK_CAPTURING_APPS: OnceLock<Mutex<Option<Vec<String>>>> = OnceLock::new();
+
+#[cfg(dev)]
+pub fn set_mock_capturing_apps(apps: Option<Vec<String>>) {
+    let cell = MOCK_CAPTURING_APPS.get_or_init(|| Mutex::new(None));
+    *cell.lock().unwrap() = apps;
+}
+
 pub fn get_capturing_sessions(device_id: &str, icon_cache: &IconCache) -> Result<Vec<TrackedAppInfo>> {
+    #[cfg(dev)]
+    if let Some(cell) = MOCK_CAPTURING_APPS.get() {
+        if let Some(mock_names) = cell.lock().unwrap().clone() {
+            return Ok(mock_names
+                .into_iter()
+                .enumerate()
+                .map(|(idx, name)| TrackedAppInfo {
+                    id: format!("mock-{}", idx + 1),
+                    name,
+                    active: true,
+                    icon: None,
+                })
+                .collect());
+        }
+    }
+
     let our_pid = unsafe { GetCurrentProcessId() };
     let now = Instant::now();
     let mut pid_active: HashMap<u32, bool> = HashMap::new();

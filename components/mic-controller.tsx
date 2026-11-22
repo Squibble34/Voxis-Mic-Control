@@ -96,7 +96,7 @@ export function MicController({
     <Card
       data-offline={offline || undefined}
       className={cn(
-        "gap-0 overflow-hidden border-border/70 bg-card/80 py-0 backdrop-blur transition-colors duration-300 hover:border-border",
+        "gap-0 overflow-hidden border-border/70 bg-card/80 py-0 transition-colors duration-300 hover:border-border",
         offline && "border-dashed opacity-90",
       )}
     >

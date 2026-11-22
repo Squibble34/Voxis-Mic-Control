@@ -15,7 +15,8 @@ import { SettingsPanel } from "@/components/settings-panel"
 import { StatusBanner } from "@/components/status-banner"
 import { StatusBar } from "@/components/status-bar"
 import { TitleBar, type AppView } from "@/components/title-bar"
-import { UpdateBanner } from "@/components/update-banner"
+import { ScheduledUpdateBanner, UpdateBanner } from "@/components/update-banner"
+import { VirtualMicBanner, type VirtualMicStatus } from "@/components/virtual-mic-banner"
 import { getCurrentWindow } from "@tauri-apps/api/window"
 import { getVersion } from "@tauri-apps/api/app"
 import {
@@ -28,6 +29,7 @@ import {
   DEFAULT_APPEARANCE_SETTINGS,
   DEFAULT_KEYBINDS_SETTINGS,
   DEFAULT_NOISE_SETTINGS,
+  DEFAULT_PROFILES_CONFIG,
   DEFAULT_SYSTEM_SETTINGS,
   DEFAULT_WINDOWS_SETTINGS,
   getContrastForeground,
@@ -36,12 +38,12 @@ import {
   type KeybindsSettings,
   type NoiseEngineId,
   type NoiseSettings,
+  type ProfileSnapshot,
+  type ProfilesConfig,
   type SystemSettings,
   type VoiceToneId,
   type WindowsSettings,
 } from "@/lib/settings-types"
-import { useGlobalHotkey } from "@/lib/use-global-hotkey"
-import { playMuteSound, preloadMuteSounds } from "@/lib/mute-sound"
 import { useWindowSizeSync } from "@/lib/use-window-size-sync"
 
 const WINDOW_WIDTH = 644
@@ -75,25 +77,19 @@ export function AppWindow() {
   const [talkingWhileMutedPopup, setTalkingWhileMutedPopup] = React.useState(
     DEFAULT_SYSTEM_SETTINGS.talkingWhileMutedPopup,
   )
+  const [persistentPillEnabled, setPersistentPillEnabled] = React.useState(
+    DEFAULT_SYSTEM_SETTINGS.persistentPillEnabled,
+  )
   const [soundEnabled, setSoundEnabled] = React.useState(DEFAULT_SYSTEM_SETTINGS.soundEnabled)
   const [soundVolume, setSoundVolume] = React.useState(DEFAULT_SYSTEM_SETTINGS.soundVolume)
   const [autoMuteEnabled, setAutoMuteEnabled] = React.useState(DEFAULT_SYSTEM_SETTINGS.autoMuteEnabled)
   const [autoMuteMinutes, setAutoMuteMinutes] = React.useState(DEFAULT_SYSTEM_SETTINGS.autoMuteMinutes)
 
-  // refs so the listener below, registered once, always reads the latest values
-  const soundEnabledRef = React.useRef(soundEnabled)
-  const soundVolumeRef = React.useRef(soundVolume)
-  React.useEffect(() => {
-    soundEnabledRef.current = soundEnabled
-  }, [soundEnabled])
-  React.useEffect(() => {
-    soundVolumeRef.current = soundVolume
-  }, [soundVolume])
-
   function updateSystemSettings(patch: Partial<SystemSettings>) {
     if (patch.popupEnabled !== undefined) setPopupEnabled(patch.popupEnabled)
     if (patch.popupLocation !== undefined) setPopupLocation(patch.popupLocation)
     if (patch.talkingWhileMutedPopup !== undefined) setTalkingWhileMutedPopup(patch.talkingWhileMutedPopup)
+    if (patch.persistentPillEnabled !== undefined) setPersistentPillEnabled(patch.persistentPillEnabled)
     if (patch.soundEnabled !== undefined) setSoundEnabled(patch.soundEnabled)
     if (patch.soundVolume !== undefined) setSoundVolume(patch.soundVolume)
     if (patch.autoMuteEnabled !== undefined) setAutoMuteEnabled(patch.autoMuteEnabled)
@@ -185,6 +181,7 @@ export function AppWindow() {
   const [compressorEnabled, setCompressorEnabled] = React.useState(
     DEFAULT_NOISE_SETTINGS.compressorEnabled,
   )
+  const [profilesConfig, setProfilesConfig] = React.useState<ProfilesConfig>(DEFAULT_PROFILES_CONFIG)
   const [sidetoneEnabled, setSidetoneEnabled] = React.useState(false)
 
   function updateNoiseSettings(patch: Partial<NoiseSettings>) {
@@ -206,94 +203,140 @@ export function AppWindow() {
   }
 
   React.useEffect(() => {
-    const turnOffSidetone = () => {
-      invoke("set_sidetone_enabled", { enabled: false }).catch(() => {})
-    }
-    window.addEventListener("beforeunload", turnOffSidetone)
-    return () => {
-      window.removeEventListener("beforeunload", turnOffSidetone)
-      turnOffSidetone()
-    }
-  }, [])
-
-  React.useEffect(() => {
-    preloadMuteSounds()
-  }, [])
-
-  React.useEffect(() => {
-    const unlistenPromise = listen("auto-muted", () => {
-      setMuted(true)
-      if (soundEnabledRef.current) void playMuteSound(true, soundVolumeRef.current)
-      emit("mute-changed", { muted: true }).catch(console.error)
+    const unlistenMute = listen<{ muted: boolean }>("mute-changed", (event) => {
+      lastLocalChange.current = Date.now()
+      setMuted(event.payload.muted)
+    })
+    const unlistenPill = listen<{ enabled: boolean }>("persistent-pill-changed", (event) => {
+      setPersistentPillEnabled(event.payload.enabled)
     })
     return () => {
-      unlistenPromise.then((unlisten) => unlisten())
+      unlistenMute.then((unlisten) => unlisten())
+      unlistenPill.then((unlisten) => unlisten())
     }
   }, [])
 
   const [pendingUpdate, setPendingUpdate] = React.useState<{ version: string; notes: string } | null>(null)
+  const [scheduledUpdate, setScheduledUpdate] = React.useState<{ version: string; notes: string } | null>(null)
+  const [scheduledProgress, setScheduledProgress] = React.useState<{ version: string; phase: string } | null>(null)
+  const [virtualMicStatus, setVirtualMicStatus] = React.useState<VirtualMicStatus | null>(null)
   const [currentVersion, setCurrentVersion] = React.useState<string>("")
 
   React.useEffect(() => {
     getVersion().then(setCurrentVersion).catch(() => {})
+    invoke<VirtualMicStatus>("get_virtual_mic_status")
+      .then(setVirtualMicStatus)
+      .catch(() => {})
+    invoke<{ version: string; notes: string } | null>("get_pending_update")
+      .then((info) => {
+        if (info) setPendingUpdate(info)
+      })
+      .catch(() => {})
+    invoke<{ version: string; notes: string } | null>("get_scheduled_update")
+      .then((info) => {
+        setScheduledUpdate(info)
+      })
+      .catch(() => {})
+    invoke<{ version: string; phase: string } | null>("get_scheduled_update_progress")
+      .then((progress) => {
+        setScheduledProgress(progress)
+      })
+      .catch(() => {})
   }, [])
 
   React.useEffect(() => {
-    const unlistenPromise = listen<{ version: string; notes: string }>("update-available", (event) => {
+    const unlistenUpdate = listen<{ version: string; notes: string }>("update-available", (event) => {
       setPendingUpdate(event.payload)
     })
+    const unlistenScheduled = listen<{ version: string; notes: string } | null>(
+      "scheduled-update-changed",
+      (event) => {
+        setScheduledUpdate(event.payload)
+      },
+    )
+    const unlistenProgress = listen<{ version: string; phase: string } | null>(
+      "scheduled-update-progress",
+      (event) => {
+        setScheduledProgress(event.payload)
+      },
+    )
+    const unlistenVirtualMic = listen<VirtualMicStatus>(
+      "virtual-mic-status-changed",
+      (event) => {
+        setVirtualMicStatus(event.payload)
+      },
+    )
+    if (process.env.NODE_ENV === "production") {
+      return () => {
+        unlistenUpdate.then((unlisten) => unlisten())
+        unlistenScheduled.then((unlisten) => unlisten())
+        unlistenProgress.then((unlisten) => unlisten())
+        unlistenVirtualMic.then((unlisten) => unlisten())
+      }
+    }
+
+    const unlistenClear = listen("dev-update-cleared", () => {
+      setPendingUpdate(null)
+    })
+    const unlistenStatus = listen<MicStatus>("dev-status", (event) => {
+      setDismissed(false)
+      setStatus(event.payload)
+    })
+    const unlistenMuteErr = listen<string>("dev-mute-error", (event) => {
+      setMuteError(event.payload)
+      window.setTimeout(() => setMuteError(null), 3000)
+    })
+    const unlistenHotkeyErr = listen<boolean>("dev-hotkey-error", (event) => {
+      setMuteRegisterError(event.payload)
+    })
     return () => {
-      unlistenPromise.then((unlisten) => unlisten())
+      unlistenUpdate.then((unlisten) => unlisten())
+      unlistenScheduled.then((unlisten) => unlisten())
+      unlistenProgress.then((unlisten) => unlisten())
+      unlistenVirtualMic.then((unlisten) => unlisten())
+      unlistenClear.then((unlisten) => unlisten())
+      unlistenStatus.then((unlisten) => unlisten())
+      unlistenMuteErr.then((unlisten) => unlisten())
+      unlistenHotkeyErr.then((unlisten) => unlisten())
     }
   }, [])
+
+  function handleScheduleUpdateLater() {
+    if (!pendingUpdate) return
+    invoke("schedule_update_for_reopen", {
+      version: pendingUpdate.version,
+      notes: pendingUpdate.notes,
+    }).catch(console.error)
+  }
+
+  function handleCancelScheduledUpdate() {
+    invoke("cancel_scheduled_update").catch(console.error)
+  }
+
+  function handleRetryUsbipSetup(forceReinstall: boolean) {
+    invoke("retry_usbip_setup", { forceReinstall }).catch(console.error)
+  }
+
+  function handleOpenUsbipReleasePage() {
+    invoke("open_usbip_release_page").catch(console.error)
+  }
 
   const [inputLevel, setInputLevel] = React.useState<number | undefined>(undefined)
   const [talkingWhileMuted, setTalkingWhileMuted] = React.useState(false)
-  const mutedSpeechTicksRef = React.useRef(0)
-  const lastMutedPopupTimeRef = React.useRef(0)
-  const clearTalkingTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
-  const mutedRef = React.useRef(muted)
-  const talkingPopupEnabledRef = React.useRef(talkingWhileMutedPopup)
   React.useEffect(() => {
-    mutedRef.current = muted
-    if (!muted) {
-      mutedSpeechTicksRef.current = 0
-      setTalkingWhileMuted(false)
-    }
+    if (!muted) setTalkingWhileMuted(false)
   }, [muted])
-  React.useEffect(() => {
-    talkingPopupEnabledRef.current = talkingWhileMutedPopup
-  }, [talkingWhileMutedPopup])
 
   React.useEffect(() => {
-    const unlistenPromise = listen<number>("input-level-changed", (event) => {
-      const level = event.payload
-      setInputLevel(level)
-
-      if (!mutedRef.current) return
-      if (level >= 18) {
-        mutedSpeechTicksRef.current += 1
-        if (clearTalkingTimeoutRef.current) clearTimeout(clearTalkingTimeoutRef.current)
-        clearTalkingTimeoutRef.current = setTimeout(() => {
-          mutedSpeechTicksRef.current = 0
-          setTalkingWhileMuted(false)
-        }, 1400)
-
-        if (mutedSpeechTicksRef.current >= 22) {
-          setTalkingWhileMuted(true)
-          const now = Date.now()
-          if (talkingPopupEnabledRef.current && now - lastMutedPopupTimeRef.current > 8000) {
-            lastMutedPopupTimeRef.current = now
-            emit("talking-while-muted").catch(console.error)
-          }
-        }
-      } else {
-        mutedSpeechTicksRef.current = Math.max(0, mutedSpeechTicksRef.current - 1)
-      }
+    const unlistenLevelPromise = listen<number>("input-level-changed", (event) => {
+      setInputLevel(event.payload)
+    })
+    const unlistenTalkingPromise = listen<boolean>("talking-while-muted-state", (event) => {
+      setTalkingWhileMuted(event.payload)
     })
     return () => {
-      if (clearTalkingTimeoutRef.current) clearTimeout(clearTalkingTimeoutRef.current)
-      unlistenPromise.then((unlisten) => unlisten())
+      unlistenLevelPromise.then((unlisten) => unlisten())
+      unlistenTalkingPromise.then((unlisten) => unlisten())
     }
   }, [])
 
@@ -356,6 +399,41 @@ export function AppWindow() {
   }, [])
 
   React.useEffect(() => {
+    const unlistenDevice = listen<{ deviceId: string }>("device-changed", (event) => {
+      const nextId = event.payload.deviceId
+      setDeviceId(nextId)
+      syncDeviceState(nextId)
+      storeRef.current?.set("lastDeviceId", nextId)
+      storeRef.current?.save().catch(console.error)
+    })
+    const unlistenProfile = listen<{ profileId?: string | null; snapshot: ProfileSnapshot }>(
+      "profile-applied",
+      (event) => {
+        const snap = event.payload.snapshot
+        if (snap.systemSettings) updateSystemSettings(snap.systemSettings)
+        if (snap.appearanceSettings) updateAppearanceSettings(snap.appearanceSettings)
+        if (snap.keybindsSettings) updateKeybindsSettings(snap.keybindsSettings)
+        if (snap.windowsSettings) updateWindowsSettings(snap.windowsSettings)
+        if (snap.noiseSettings) updateNoiseSettings(snap.noiseSettings)
+        if (typeof snap.softwareGain === "number") {
+          setVolume(Math.round(snap.softwareGain * 100))
+          storeRef.current?.set("softwareGain", snap.softwareGain)
+        }
+        if (event.payload.profileId !== undefined) {
+          setProfilesConfig((prev) => ({
+            ...prev,
+            activeProfileId: event.payload.profileId ?? null,
+          }))
+        }
+      },
+    )
+    return () => {
+      unlistenDevice.then((unlisten) => unlisten())
+      unlistenProfile.then((unlisten) => unlisten())
+    }
+  }, [syncDeviceState])
+
+  React.useEffect(() => {
     load("settings.json", { autoSave: false })
       .then((store) => {
         storeRef.current = store
@@ -366,15 +444,17 @@ export function AppWindow() {
           store.get<KeybindsSettings>("keybindsSettings"),
           store.get<WindowsSettings>("windowsSettings"),
           store.get<NoiseSettings>("noiseSettings"),
+          store.get<ProfilesConfig>("profilesConfig"),
         ])
       })
-      .then(([savedDeviceId, savedSystemSettings, savedAppearanceSettings, savedKeybindsSettings, savedWindowsSettings, savedNoiseSettings]) => {
+      .then(([savedDeviceId, savedSystemSettings, savedAppearanceSettings, savedKeybindsSettings, savedWindowsSettings, savedNoiseSettings, savedProfilesConfig]) => {
         savedDeviceIdRef.current = savedDeviceId ?? null
 
         const system = { ...DEFAULT_SYSTEM_SETTINGS, ...savedSystemSettings }
         setPopupEnabled(system.popupEnabled)
         setPopupLocation(system.popupLocation)
         setTalkingWhileMutedPopup(system.talkingWhileMutedPopup)
+        setPersistentPillEnabled(system.persistentPillEnabled)
         setSoundEnabled(system.soundEnabled)
         setSoundVolume(system.soundVolume)
         setAutoMuteEnabled(system.autoMuteEnabled)
@@ -410,6 +490,10 @@ export function AppWindow() {
         setNoiseGateEnabled(noise.noiseGateEnabled)
         setNoiseGateThreshold(noise.noiseGateThreshold)
         setCompressorEnabled(noise.compressorEnabled)
+
+        if (savedProfilesConfig) {
+          setProfilesConfig({ ...DEFAULT_PROFILES_CONFIG, ...savedProfilesConfig })
+        }
       })
       .catch((err) => console.error("Failed to load settings:", err))
       .finally(() => setSettingsReady(true))
@@ -421,6 +505,7 @@ export function AppWindow() {
       popupEnabled,
       popupLocation,
       talkingWhileMutedPopup,
+      persistentPillEnabled,
       soundEnabled,
       soundVolume,
       autoMuteEnabled,
@@ -428,13 +513,17 @@ export function AppWindow() {
     }
     storeRef.current?.set("systemSettings", system)
     storeRef.current?.save().catch(console.error)
+    invoke("set_persistent_pill_enabled", { enabled: persistentPillEnabled }).catch(console.error)
+    invoke("set_sound_settings", { enabled: soundEnabled, volume: soundVolume }).catch(console.error)
     invoke("set_auto_mute_enabled", { enabled: autoMuteEnabled }).catch(console.error)
     invoke("set_auto_mute_idle_minutes", { minutes: autoMuteMinutes }).catch(console.error)
+    invoke("set_talking_popup_enabled", { enabled: talkingWhileMutedPopup }).catch(console.error)
   }, [
     settingsReady,
     popupEnabled,
     popupLocation,
     talkingWhileMutedPopup,
+    persistentPillEnabled,
     soundEnabled,
     soundVolume,
     autoMuteEnabled,
@@ -517,6 +606,17 @@ export function AppWindow() {
   ])
 
   React.useEffect(() => {
+    if (!settingsReady) return
+    storeRef.current?.set("profilesConfig", profilesConfig)
+    storeRef.current?.save().catch(console.error)
+    invoke("sync_profiles_config", { config: profilesConfig }).catch(console.error)
+  }, [settingsReady, profilesConfig])
+
+  const handleApplyProfile = React.useCallback((profileId: string) => {
+    invoke("apply_profile", { profileId }).catch(console.error)
+  }, [])
+
+  React.useEffect(() => {
     if (!settingsReady || !rememberWindowPosition) return
 
     let debounceId: ReturnType<typeof setTimeout> | null = null
@@ -564,12 +664,13 @@ export function AppWindow() {
 
   React.useEffect(() => {
     if (!settingsReady) return
-    getCurrentWindow().setAlwaysOnTop(alwaysOnTop).catch(console.error)
+    invoke("set_always_on_top", { enabled: alwaysOnTop }).catch(console.error)
   }, [settingsReady, alwaysOnTop])
 
   React.useEffect(() => {
-    invoke("set_tray_icon", { muted, accentColor: accentColor ?? THEME_PRIMARY_HEX[theme] }).catch(console.error)
-  }, [muted, accentColor])
+    if (!settingsReady) return
+    invoke("set_tray_icon", { accentColor: accentColor ?? THEME_PRIMARY_HEX[theme] }).catch(console.error)
+  }, [settingsReady, theme, accentColor])
 
   // the popup is a separate window and cant see this components state, so tell it about popup relevant changes over an event instead
   React.useEffect(() => {
@@ -586,76 +687,74 @@ export function AppWindow() {
     emit("appearance-settings-changed", { theme, accentColor, reduceMotion }).catch(console.error)
   }, [settingsReady, theme, accentColor, reduceMotion])
 
-  const refreshDevices = React.useCallback(() => {
-    invoke<Device[]>("get_audio_devices")
-      .then((devs) => {
-        setDevices(devs)
-        setDevicesLoaded(true)
+  const applyDeviceList = React.useCallback(
+    (devs: Device[]) => {
+      setDevices(devs)
+      setDevicesLoaded(true)
 
-        if (devs.length === 0) {
-          setStatus("no-devices")
-          return
+      if (devs.length === 0) {
+        setStatus("no-devices")
+        return
+      }
+
+      setDeviceId((currentId) => {
+        if (!currentId) {
+          const preferred = savedDeviceIdRef.current
+          const target =
+            preferred && devs.some((d) => d.id === preferred) ? preferred : devs[0].id
+
+          syncDeviceState(target)
+          setStatus("ready")
+          invoke("set_monitor_device", { deviceId: target }).catch(console.error)
+
+          return target
         }
 
-        setDeviceId((currentId) => {
-          if (!currentId) {
-            const preferred = savedDeviceIdRef.current
-            const target =
-              preferred && devs.some((d) => d.id === preferred) ? preferred : devs[0].id
+        const stillPresent = devs.some((d) => d.id === currentId)
 
-            syncDeviceState(target)
-            setStatus("ready")
-            invoke("set_monitor_device", { deviceId: target }).catch(console.error)
-
-            invoke<boolean>("get_mute_state", { deviceId: target })
-              .then((isMuted) => {
-                if (!isMuted) {
-                  invoke("set_mute_state", { deviceId: target, muted: true }).catch(console.error)
-                  setMuted(true)
-                }
-              })
-              .catch(console.error)
-
-            return target
-          }
-
-          const stillPresent = devs.some((d) => d.id === currentId)
-
-          if (!stillPresent) {
-            setStatus("disconnected")
-            return currentId
-          }
-
-          setStatus((prevStatus) => {
-            if (prevStatus === "disconnected" || prevStatus === "reconnecting") {
-              window.setTimeout(() => setStatus("ready"), 900)
-              return "reconnecting"
-            }
-            if (prevStatus === "no-devices") return "ready"
-            return prevStatus
-          })
-
-          // syncs regardless of status, this is what catches mute/volume changes made outside the app like a hardware button or the windows mixer
-          if (Date.now() - lastLocalChange.current > 2500) {
-            syncDeviceState(currentId)
-          }
-
+        if (!stillPresent) {
+          setStatus("disconnected")
           return currentId
+        }
+
+        setStatus((prevStatus) => {
+          if (prevStatus === "disconnected" || prevStatus === "reconnecting") {
+            window.setTimeout(() => setStatus("ready"), 900)
+            return "reconnecting"
+          }
+          if (prevStatus === "no-devices") return "ready"
+          return prevStatus
         })
+
+        if (Date.now() - lastLocalChange.current > 2500) {
+          syncDeviceState(currentId)
+        }
+
+        return currentId
       })
+    },
+    [syncDeviceState],
+  )
+
+  const refreshDevices = React.useCallback(() => {
+    invoke<Device[]>("get_audio_devices")
+      .then(applyDeviceList)
       .catch((err) => {
         console.error(err)
         setDevicesLoaded(true)
       })
-  }, [syncDeviceState])
+  }, [applyDeviceList])
 
-  // initial load then poll every 2s, windows doesnt push plug/unplug events to us here so we detect them by re-checking the device list
   React.useEffect(() => {
     if (!settingsReady) return
     refreshDevices()
-    const interval = window.setInterval(refreshDevices, 2000)
-    return () => window.clearInterval(interval)
-  }, [refreshDevices, settingsReady])
+    const unlistenPromise = listen<Device[]>("audio-devices-changed", (event) => {
+      applyDeviceList(event.payload)
+    })
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten())
+    }
+  }, [refreshDevices, applyDeviceList, settingsReady])
 
   const handleMutedChange = React.useCallback(
     (newMuted: boolean) => {
@@ -664,19 +763,12 @@ export function AppWindow() {
       setMuted(newMuted)
       setMuteError(null)
 
-      invoke("set_mute_state", { deviceId, muted: newMuted })
-      .then(() => invoke<boolean>("get_mute_state", { deviceId }))
-      .then((actual) => {
-        setMuted(actual)
-        if (soundEnabledRef.current) void playMuteSound(actual, soundVolumeRef.current)
-        emit("mute-changed", { muted: actual }).catch(console.error)
+      invoke("set_mute_state", { deviceId, muted: newMuted }).catch((err) => {
+        console.error(err)
+        setMuted(previous)
+        setMuteError("Couldn't change mute state")
+        window.setTimeout(() => setMuteError(null), 3000)
       })
-      .catch((err) => {
-          console.error(err)
-          setMuted(previous)
-          setMuteError("Couldn't change mute state")
-          window.setTimeout(() => setMuteError(null), 3000)
-        })
     },
     [deviceId, muted],
   )
@@ -704,27 +796,27 @@ export function AppWindow() {
   }, [settingsReady, volumeBoostEnabled, volume, handleVolumeChange])
 
   const descriptor = MIC_STATUS[status]
+  const [muteRegisterError, setMuteRegisterError] = React.useState(false)
 
-  // registered once here regardless of which view is showing, switching to settings or anywhere else never unregisters these
-  const { registerError: muteRegisterError } = useGlobalHotkey(
-    muteChord,
-    settingsReady && hotkeysEnabled && !descriptor.controlsDisabled,
-    () => {
-      if (hotkeyMode === "push-to-talk") {
-        handleMutedChange(false)
-      } else {
-        handleMutedChange(!muted)
-      }
-    },
-    {
-      mode: hotkeyMode,
-      onRelease: () => handleMutedChange(true),
-    },
-  )
-  useGlobalHotkey(openAppChord, settingsReady && hotkeysEnabled, () => {
-    const win = getCurrentWindow()
-    win.show().then(() => win.unminimize()).then(() => win.setFocus()).catch(console.error)
-  })
+  React.useEffect(() => {
+    if (!settingsReady) return
+    let cancelled = false
+    invoke<boolean>("sync_hotkey_settings", {
+      config: {
+        hotkeysEnabled,
+        hotkeyMode,
+        muteChord,
+        openAppChord,
+      },
+    })
+      .then((hasError) => {
+        if (!cancelled) setMuteRegisterError(hasError)
+      })
+      .catch(console.error)
+    return () => {
+      cancelled = true
+    }
+  }, [settingsReady, hotkeysEnabled, hotkeyMode, muteChord, openAppChord])
 
   // switching hotkey mode mutes so push-to-talk starts from its resting state
   // skip the initial load run so restoring a saved push-to-talk mode on startup doesnt force a mute
@@ -919,17 +1011,33 @@ export function AppWindow() {
         >
           {activeView === "main" ? (
             <div className="flex flex-col gap-3">
-              {pendingUpdate && (
-                <UpdateBanner
+              {scheduledProgress ? (
+                <ScheduledUpdateBanner
                   currentVersion={currentVersion}
-                  version={pendingUpdate.version}
-                  notes={pendingUpdate.notes}
-                  onDismiss={() => setPendingUpdate(null)}
+                  version={scheduledProgress.version}
+                  phase={scheduledProgress.phase}
+                  onCancel={handleCancelScheduledUpdate}
                 />
+              ) : (
+                pendingUpdate &&
+                !scheduledUpdate && (
+                  <UpdateBanner
+                    currentVersion={currentVersion}
+                    version={pendingUpdate.version}
+                    notes={pendingUpdate.notes}
+                    onScheduleLater={handleScheduleUpdateLater}
+                    onDismiss={() => setPendingUpdate(null)}
+                  />
+                )
               )}
               {showBanner && (
                 <StatusBanner status={status} busy={busy} onAction={handleAction} />
               )}
+              <VirtualMicBanner
+                virtualMicStatus={virtualMicStatus}
+                onRetry={handleRetryUsbipSetup}
+                onOpenManualDownload={handleOpenUsbipReleasePage}
+              />
               {muteError && (
                 <div className="animate-view-in rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive">
                   {muteError}
@@ -979,6 +1087,7 @@ export function AppWindow() {
                 popupEnabled,
                 popupLocation,
                 talkingWhileMutedPopup,
+                persistentPillEnabled,
                 soundEnabled,
                 soundVolume,
                 autoMuteEnabled,
@@ -1011,6 +1120,11 @@ export function AppWindow() {
                 compressorEnabled,
               }}
               onNoiseSettingsChange={updateNoiseSettings}
+              softwareGain={volume / 100}
+              profilesConfig={profilesConfig}
+              onProfilesConfigChange={setProfilesConfig}
+              onApplyProfile={handleApplyProfile}
+              trackedApps={trackedApps}
               funModeUnlocked={funModeUnlocked}
               onFunModeUnlockedChange={setFunModeUnlocked}
               funModeEnabled={funModeEnabled}
@@ -1025,13 +1139,23 @@ export function AppWindow() {
               onFunnyMicChange={setFunnyMic}
               pendingUpdate={pendingUpdate}
               onPendingUpdateChange={setPendingUpdate}
+              scheduledUpdate={scheduledUpdate}
+              scheduledProgress={scheduledProgress}
+              onCancelScheduledUpdate={handleCancelScheduledUpdate}
+              virtualMicStatus={virtualMicStatus}
+              onRetryUsbipSetup={handleRetryUsbipSetup}
             />
           )}
         </div>
       </main>
 
       <div ref={statusBarRef}>
-        <StatusBar status={status} muted={muted} />
+        <StatusBar
+          status={status}
+          muted={muted}
+          version={currentVersion}
+          virtualMicState={virtualMicStatus?.state}
+        />
       </div>
     </div>
   )

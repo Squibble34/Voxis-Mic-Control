@@ -16,7 +16,7 @@ const PLACEHOLDER_APPS: TrackedApp[] = []
 
 export function AppTrackerCard({ apps = PLACEHOLDER_APPS }: { apps?: TrackedApp[] }) {
   return (
-    <Card className="group/tracker gap-0 py-0 border-border/70 bg-card/80 backdrop-blur transition-colors duration-300 hover:border-border">
+    <Card className="group/tracker gap-0 py-0 border-border/70 bg-card/80 transition-colors duration-300 hover:border-border">
       <CardContent className="flex flex-col gap-2 px-3 py-2.5">
         <div className="flex items-center gap-2">
         <span className="flex size-7 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-muted/50 text-muted-foreground">

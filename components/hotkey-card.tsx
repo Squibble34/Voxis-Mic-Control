@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { invoke } from "@tauri-apps/api/core"
 import { AlertTriangle, Keyboard, Pencil, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -35,14 +36,34 @@ export function HotkeyCard({
 }) {
   const [listening, setListening] = React.useState(false)
   const [rejection, setRejection] = React.useState<HotkeyIssue | null>(null)
-  const issue = React.useMemo(() => validateChord(chord), [chord])
+  const issue = React.useMemo(() => validateChord(chord, mode), [chord, mode])
 
   React.useEffect(() => {
     if (listening) setRejection(null)
+    invoke("set_hotkeys_paused", { paused: listening }).catch(() => {})
+    return () => {
+      if (listening) {
+        invoke("set_hotkeys_paused", { paused: false }).catch(() => {})
+      }
+    }
   }, [listening])
 
   React.useEffect(() => {
     if (!listening) return
+
+    function commitParts(parts: string[]) {
+      const nextIssue = validateChord(parts, mode)
+
+      // reserved chords never reach an app, so keep the old binding instead of overwriting it with a dead one
+      if (nextIssue === "reserved") {
+        setRejection("reserved")
+        setListening(false)
+        return
+      }
+
+      onChordChange(parts)
+      setListening(false)
+    }
 
     function handleKeyDown(event: KeyboardEvent) {
       event.preventDefault()
@@ -61,17 +82,36 @@ export function HotkeyCard({
       if (MODIFIERS.includes(key)) return
 
       parts.push(key === " " ? "Space" : key.length === 1 ? key.toUpperCase() : key)
-      const nextIssue = validateChord(parts)
+      commitParts(parts)
+    }
 
-      // reserved chords never reach an app, so keep the old binding instead of overwriting it with a dead one
-      if (nextIssue === "reserved") {
-        setRejection("reserved")
-        setListening(false)
-        return
+    function handleMouseDown(event: MouseEvent) {
+      const mouseName =
+        event.button === 1
+          ? "Mouse3"
+          : event.button === 3
+            ? "Mouse4"
+            : event.button === 4
+              ? "Mouse5"
+              : null
+      if (!mouseName) return
+
+      event.preventDefault()
+      event.stopPropagation()
+
+      const parts: string[] = []
+      if (event.ctrlKey) parts.push("Ctrl")
+      if (event.altKey) parts.push("Alt")
+      if (event.shiftKey) parts.push("Shift")
+      if (event.metaKey) parts.push("Super")
+      parts.push(mouseName)
+      commitParts(parts)
+    }
+
+    function preventAuxNavigation(event: MouseEvent) {
+      if (event.button === 1 || event.button === 3 || event.button === 4) {
+        event.preventDefault()
       }
-
-      onChordChange(parts)
-      setListening(false)
     }
 
     function handleBlur() {
@@ -79,12 +119,16 @@ export function HotkeyCard({
     }
 
     window.addEventListener("keydown", handleKeyDown)
+    window.addEventListener("mousedown", handleMouseDown, true)
+    window.addEventListener("auxclick", preventAuxNavigation, true)
     window.addEventListener("blur", handleBlur)
     return () => {
       window.removeEventListener("keydown", handleKeyDown)
+      window.removeEventListener("mousedown", handleMouseDown, true)
+      window.removeEventListener("auxclick", preventAuxNavigation, true)
       window.removeEventListener("blur", handleBlur)
     }
-  }, [listening, onChordChange])
+  }, [listening, mode, onChordChange])
 
   React.useEffect(() => {
     if (disabled) setListening(false)

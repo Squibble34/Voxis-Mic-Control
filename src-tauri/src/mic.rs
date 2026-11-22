@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,18 @@ use nnnoiseless::{DenoiseState, FRAME_SIZE};
 const OUTPUT_RATE_HZ: f64 = 48_000.0;
 const TARGET_FILL_MS: f64 = 50.0;
 const MAX_FILL_MS: f64 = 120.0;
+// threshold above background hiss so static never keeps speech vad latched
+const SPEECH_MIN_PEAK: f32 = 0.012;
+const SPEECH_PROB_THRESHOLD: f32 = 0.55;
+
+static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+pub fn monotonic_ms() -> u64 {
+    MONOTONIC_ORIGIN
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
 // 0.5 percent is about 9 cents of pitch, far more than any real crystal mismatch needs
 const MAX_RATIO_ADJUST: f64 = 0.005;
 // averages the fill level over roughly 200 ms so the 10 ms capture callbacks dont jitter the correction
@@ -199,9 +211,12 @@ struct CaptureFilter {
     df_smoothed_ms: f32,
     df_fallback_until: Option<Instant>,
     rnnoise: Box<DenoiseState<'static>>,
+    vad_rnnoise: Box<DenoiseState<'static>>,
     deep_filter: Option<DfTract>,
     frame_pending: Vec<f32>,
+    vad_frame_pending: Vec<f32>,
     staged_samples: Vec<f32>,
+    last_speech_prob: f32,
 }
 
 // dftract uses rc internally for its tensor buffers, moving the whole struct once into the cpal callback thread is safe
@@ -249,9 +264,12 @@ impl CaptureFilter {
             df_smoothed_ms: 1.0,
             df_fallback_until: None,
             rnnoise: DenoiseState::new(),
+            vad_rnnoise: DenoiseState::new(),
             deep_filter,
             frame_pending: Vec::with_capacity(FRAME_SIZE),
+            vad_frame_pending: Vec::with_capacity(FRAME_SIZE),
             staged_samples: Vec::with_capacity(FRAME_SIZE * 4),
+            last_speech_prob: 0.0,
         }
     }
 
@@ -270,7 +288,7 @@ impl CaptureFilter {
         gain: f32,
         funny_mic: bool,
         to_f32: impl Fn(T) -> f32,
-    ) -> (&[f32], f32) {
+    ) -> (&[f32], f32, f32) {
         if !self.thread_promoted {
             crate::server::promote_audio_thread();
             self.thread_promoted = true;
@@ -317,6 +335,7 @@ impl CaptureFilter {
         }
 
         self.staged_samples.clear();
+        self.last_speech_prob = 0.0;
         let step = self.input_rate_hz / OUTPUT_RATE_HZ;
         let same_rate = (self.input_rate_hz - OUTPUT_RATE_HZ).abs() < 0.5;
         let mut batch_peak = 0.0f32;
@@ -418,7 +437,7 @@ impl CaptureFilter {
             }
         }
 
-        (&self.staged_samples, batch_peak)
+        (&self.staged_samples, batch_peak, self.last_speech_prob)
     }
 
     fn push_48k_sample(&mut self, raw_sample: f32) {
@@ -430,18 +449,21 @@ impl CaptureFilter {
         match self.active_engine {
             NoiseEngine::Off => {
                 self.staged_samples.push(sample);
+                self.update_aux_vad(sample);
             }
             NoiseEngine::Rnnoise => {
                 // nnnoiseless expects i16 sized values in f32, not the usual -1 to 1 range
                 self.frame_pending.push(sample * 32768.0);
                 if self.frame_pending.len() == FRAME_SIZE {
                     let mut cleaned = [0.0f32; FRAME_SIZE];
-                    self.rnnoise.process_frame(&mut cleaned, &self.frame_pending);
+                    let prob = self.rnnoise.process_frame(&mut cleaned, &self.frame_pending);
+                    self.last_speech_prob = self.last_speech_prob.max(prob);
                     self.frame_pending.clear();
                     self.staged_samples.extend(cleaned.iter().map(|&out| out / 32768.0));
                 }
             }
             NoiseEngine::DeepFilterNet => {
+                self.update_aux_vad(sample);
                 let Some(df) = self.deep_filter.as_mut() else {
                     self.staged_samples.push(sample);
                     return;
@@ -475,6 +497,16 @@ impl CaptureFilter {
             }
         }
     }
+
+    fn update_aux_vad(&mut self, sample: f32) {
+        self.vad_frame_pending.push(sample * 32768.0);
+        if self.vad_frame_pending.len() == FRAME_SIZE {
+            let mut scratch = [0.0f32; FRAME_SIZE];
+            let prob = self.vad_rnnoise.process_frame(&mut scratch, &self.vad_frame_pending);
+            self.last_speech_prob = self.last_speech_prob.max(prob);
+            self.vad_frame_pending.clear();
+        }
+    }
 }
 
 struct FeedState {
@@ -506,6 +538,10 @@ pub struct MicFeed {
     compressor_enabled: AtomicBool,
     funny_mic_enabled: AtomicBool,
     sidetone_enabled: AtomicBool,
+    input_rate_hz: AtomicU32,
+    df_fallback_active: AtomicBool,
+    speech_prob_bits: AtomicU32,
+    last_speech_ms: AtomicU64,
 }
 
 impl MicFeed {
@@ -523,7 +559,7 @@ impl MicFeed {
             sidetone_samples: Mutex::new(VecDeque::with_capacity(4096)),
             target_device_id: Mutex::new(String::new()),
             device_changed: AtomicBool::new(false),
-            muted: AtomicBool::new(false),
+            muted: AtomicBool::new(true),
             gain_bits: AtomicU32::new(1.0f32.to_bits()),
             raw_peak_bits: AtomicU32::new(0.0f32.to_bits()),
             engine: AtomicU8::new(NoiseEngine::Rnnoise as u8),
@@ -537,6 +573,10 @@ impl MicFeed {
             compressor_enabled: AtomicBool::new(false),
             funny_mic_enabled: AtomicBool::new(false),
             sidetone_enabled: AtomicBool::new(false),
+            input_rate_hz: AtomicU32::new(0),
+            df_fallback_active: AtomicBool::new(false),
+            speech_prob_bits: AtomicU32::new(0.0f32.to_bits()),
+            last_speech_ms: AtomicU64::new(0),
         }
     }
 
@@ -663,6 +703,21 @@ impl MicFeed {
         self.sidetone_enabled.load(Ordering::Relaxed)
     }
 
+    pub fn diagnostics_snapshot(&self) -> (u32, u64, u64, bool, &'static str) {
+        let (underruns, overflow_drops) = self
+            .state
+            .lock()
+            .map(|s| (s.underruns, s.overflow_drops))
+            .unwrap_or((0, 0));
+        (
+            self.input_rate_hz.load(Ordering::Relaxed),
+            underruns,
+            overflow_drops,
+            self.df_fallback_active.load(Ordering::Relaxed),
+            self.engine().as_str(),
+        )
+    }
+
     // decay on read instead of resetting to zero so short transients show up and fall smoothly
     pub fn take_peak_level(&self) -> f32 {
         let raw = f32::from_bits(self.raw_peak_bits.load(Ordering::Relaxed));
@@ -671,11 +726,29 @@ impl MicFeed {
         (raw * self.gain()).clamp(0.0, 1.0)
     }
 
-    fn record_raw_peak(&self, batch_peak: f32) {
+    fn record_raw_peak(&self, batch_peak: f32, speech_prob: f32) {
         let current = f32::from_bits(self.raw_peak_bits.load(Ordering::Relaxed));
         if batch_peak > current {
             self.raw_peak_bits.store(batch_peak.to_bits(), Ordering::Relaxed);
         }
+        let cur_prob = f32::from_bits(self.speech_prob_bits.load(Ordering::Relaxed));
+        if speech_prob > cur_prob {
+            self.speech_prob_bits.store(speech_prob.to_bits(), Ordering::Relaxed);
+        }
+        if speech_prob >= SPEECH_PROB_THRESHOLD && batch_peak >= SPEECH_MIN_PEAK {
+            self.last_speech_ms.store(monotonic_ms(), Ordering::Relaxed);
+        }
+    }
+
+    pub fn take_speech_prob(&self) -> f32 {
+        let prob = f32::from_bits(self.speech_prob_bits.load(Ordering::Relaxed));
+        let decayed = prob * 0.78;
+        self.speech_prob_bits.store(decayed.to_bits(), Ordering::Relaxed);
+        prob
+    }
+
+    pub fn last_speech_ms(&self) -> u64 {
+        self.last_speech_ms.load(Ordering::Relaxed)
     }
 
     fn push_processed(&self, processed: &[f32]) {
@@ -713,6 +786,9 @@ impl MicFeed {
 
     fn reset_for_reconnect(&self) {
         self.raw_peak_bits.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.speech_prob_bits.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.input_rate_hz.store(0, Ordering::Relaxed);
+        self.df_fallback_active.store(false, Ordering::Relaxed);
         let mut state = self.state.lock().unwrap();
         state.samples.clear();
         state.frac = 0.0;
@@ -954,6 +1030,7 @@ fn open_stream(
     let config = select_input_config(&device)?;
     let channels = config.channels() as usize;
     let input_rate_hz = config.sample_rate() as f64;
+    feed.input_rate_hz.store(config.sample_rate(), Ordering::Relaxed);
     let initial_engine = feed.engine();
     log::info!(
         "capturing from {label}: {input_rate_hz} Hz, {channels} ch, {:?}, engine={}",
@@ -978,7 +1055,7 @@ fn open_stream(
         SampleFormat::F32 => device.build_input_stream(
             config.into(),
             move |samples: &[f32], _: &_| {
-                let (processed, peak) = filter.process_frames(
+                let (processed, peak, speech_prob) = filter.process_frames(
                     samples,
                     channels,
                     feed.engine(),
@@ -993,8 +1070,9 @@ fn open_stream(
                     feed.funny_mic_enabled(),
                     |sample| sample,
                 );
-                feed.record_raw_peak(peak);
+                feed.record_raw_peak(peak, speech_prob);
                 feed.push_processed(processed);
+                feed.df_fallback_active.store(filter.df_fallback_until.is_some(), Ordering::Relaxed);
             },
             on_error,
             None,
@@ -1002,7 +1080,7 @@ fn open_stream(
         SampleFormat::I16 => device.build_input_stream(
             config.into(),
             move |samples: &[i16], _: &_| {
-                let (processed, peak) = filter.process_frames(
+                let (processed, peak, speech_prob) = filter.process_frames(
                     samples,
                     channels,
                     feed.engine(),
@@ -1017,8 +1095,9 @@ fn open_stream(
                     feed.funny_mic_enabled(),
                     |sample| sample as f32 / 32768.0,
                 );
-                feed.record_raw_peak(peak);
+                feed.record_raw_peak(peak, speech_prob);
                 feed.push_processed(processed);
+                feed.df_fallback_active.store(filter.df_fallback_until.is_some(), Ordering::Relaxed);
             },
             on_error,
             None,

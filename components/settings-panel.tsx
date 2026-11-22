@@ -1,11 +1,14 @@
 "use client"
 
 import * as React from "react"
-import { AppWindow, AudioWaveform, Info, Keyboard, Palette, ShieldAlert, Sparkles } from "lucide-react"
+import { AppWindow, AudioWaveform, Info, Keyboard, Layers, Palette, Sparkles } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import { getVersion } from "@tauri-apps/api/app"
 import { CHANGELOG } from "@/lib/changelog"
+import type { TrackedApp } from "@/components/app-tracker-card"
+import { ProfilesSection } from "@/components/profiles-section"
 import { SlidersHorizontalIcon, type SlidersHorizontalIconHandle } from "@/components/icons/sliders-horizontal-icon"
+import { WrenchIcon, type WrenchIconHandle } from "@/components/icons/wrench-icon"
 import {
   DEFAULT_APPEARANCE_SETTINGS,
   DEFAULT_KEYBINDS_SETTINGS,
@@ -17,12 +20,15 @@ import {
   type KeybindsSettings,
   type NoiseEngineId,
   type NoiseSettings,
+  type ProfilesConfig,
   type SystemSettings,
   type VoiceToneId,
   type WindowsSettings,
 } from "@/lib/settings-types"
 
 import { Separator } from "@/components/ui/separator"
+import { Button } from "@/components/ui/button"
+import type { VirtualMicStatus } from "@/components/virtual-mic-banner"
 import { cn } from "@/lib/utils"
 import {
   AccentColorRow,
@@ -38,7 +44,7 @@ import {
   ToggleRow,
 } from "@/components/settings-controls"
 
-type SectionId = "general" | "noise" | "windows" | "behavior" | "appearance" | "keybinds" | "danger"
+type SectionId = "general" | "noise" | "windows" | "behavior" | "appearance" | "keybinds" | "profiles" | "danger"
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ElementType | null }[] = [
   { id: "general", label: "General", icon: Info },
@@ -47,7 +53,8 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ElementType | null }
   { id: "behavior", label: "Behavior", icon: null },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "keybinds", label: "Keybinds", icon: Keyboard },
-  { id: "danger", label: "Danger Zone", icon: ShieldAlert },
+  { id: "profiles", label: "Profiles", icon: Layers },
+  { id: "danger", label: "Maintenance", icon: null },
 ]
 
 const ICON_HOVER_ANIMATION: Record<SectionId, string> = {
@@ -57,7 +64,8 @@ const ICON_HOVER_ANIMATION: Record<SectionId, string> = {
   behavior: "group-hover:animate-heartbeat",
   appearance: "group-hover:animate-hue-cycle",
   keybinds: "group-hover:animate-bob",
-  danger: "group-hover:animate-shake",
+  profiles: "group-hover:animate-pop",
+  danger: "",
 }
 
 const NOISE_ENGINE_OPTIONS = [
@@ -94,6 +102,25 @@ const FUN_MODE_CLICKS = 3
 const FUN_MODE_WINDOW_MS = 600
 
 export type PendingUpdateInfo = { version: string; notes: string }
+export type ScheduledUpdateProgress = { version: string; phase: string }
+
+type DiagnosticsReport = {
+  appVersion: string
+  virtualMicFound: boolean
+  virtualMicId: string | null
+  usbipInstalled: boolean
+  usbipListening: boolean
+  usbipActiveConnections: number
+  inputDeviceId: string
+  inputDeviceName: string | null
+  inputSampleRateHz: number
+  noiseEngine: string
+  deepfilterFallbackActive: boolean
+  bufferUnderruns: number
+  bufferOverflowDrops: number
+  muted: boolean
+  sidetoneEnabled: boolean
+}
 
 export function SettingsPanel({
   systemSettings,
@@ -106,6 +133,11 @@ export function SettingsPanel({
   onWindowsSettingsChange,
   noiseSettings,
   onNoiseSettingsChange,
+  softwareGain,
+  profilesConfig,
+  onProfilesConfigChange,
+  onApplyProfile,
+  trackedApps,
   funModeUnlocked,
   onFunModeUnlockedChange,
   funModeEnabled,
@@ -120,6 +152,11 @@ export function SettingsPanel({
   onFunnyMicChange,
   pendingUpdate,
   onPendingUpdateChange,
+  scheduledUpdate,
+  scheduledProgress,
+  onCancelScheduledUpdate,
+  virtualMicStatus,
+  onRetryUsbipSetup,
 }: {
   systemSettings: SystemSettings
   onSystemSettingsChange: (patch: Partial<SystemSettings>) => void
@@ -131,6 +168,11 @@ export function SettingsPanel({
   onWindowsSettingsChange: (patch: Partial<WindowsSettings>) => void
   noiseSettings: NoiseSettings
   onNoiseSettingsChange: (patch: Partial<NoiseSettings>) => void
+  softwareGain: number
+  profilesConfig: ProfilesConfig
+  onProfilesConfigChange: (next: ProfilesConfig) => void
+  onApplyProfile: (profileId: string) => void
+  trackedApps: TrackedApp[]
   funModeUnlocked: boolean
   onFunModeUnlockedChange: (unlocked: boolean) => void
   funModeEnabled: boolean
@@ -145,10 +187,18 @@ export function SettingsPanel({
   onFunnyMicChange: (enabled: boolean) => void
   pendingUpdate: PendingUpdateInfo | null
   onPendingUpdateChange: (update: PendingUpdateInfo | null) => void
+  scheduledUpdate: PendingUpdateInfo | null
+  scheduledProgress: ScheduledUpdateProgress | null
+  onCancelScheduledUpdate: () => void
+  virtualMicStatus: VirtualMicStatus | null
+  onRetryUsbipSetup: (forceReinstall: boolean) => void
 }) {
   const [active, setActive] = React.useState<SectionId>("general")
   const activeIndex = SECTIONS.findIndex((section) => section.id === active)
   const slidersRef = React.useRef<SlidersHorizontalIconHandle>(null)
+  const wrenchRef = React.useRef<WrenchIconHandle>(null)
+  const [diagnostics, setDiagnostics] = React.useState<DiagnosticsReport | null>(null)
+  const [diagnosticsCopied, setDiagnosticsCopied] = React.useState(false)
   const [appVersion, setAppVersion] = React.useState("")
   const [updateStatus, setUpdateStatus] = React.useState<
     "idle" | "checking" | "current" | "available" | "installing" | "error" | "install-error"
@@ -165,6 +215,9 @@ export function SettingsPanel({
     if (pendingUpdate && (updateStatus === "idle" || updateStatus === "current")) {
       setLatestVersion(pendingUpdate.version)
       setUpdateStatus("available")
+    } else if (!pendingUpdate && (updateStatus === "available" || updateStatus === "installing")) {
+      setLatestVersion(null)
+      setUpdateStatus("idle")
     }
   }, [pendingUpdate, updateStatus])
 
@@ -233,6 +286,51 @@ export function SettingsPanel({
     }
   }
 
+  React.useEffect(() => {
+    if (active !== "danger") return
+    let cancelled = false
+    const refresh = () => {
+      invoke<DiagnosticsReport>("get_diagnostics")
+        .then((report) => {
+          if (!cancelled) setDiagnostics(report)
+        })
+        .catch(console.error)
+    }
+    refresh()
+    const interval = window.setInterval(refresh, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [active])
+
+  async function handleCopyDiagnostics() {
+    try {
+      const report = await invoke<DiagnosticsReport>("get_diagnostics")
+      setDiagnostics(report)
+      const lines = [
+        `Voxis Mic Control v${report.appVersion}`,
+        `Virtual Mic Driver: ${report.virtualMicFound ? "Connected" : report.usbipInstalled ? "Installed (not attached)" : "USBip not installed"}`,
+        `Virtual Mic Endpoint: ${report.virtualMicId ?? "none"}`,
+        `USBip Daemon (127.0.0.1:3240): ${report.usbipListening ? "Listening" : "Stopped"} (${report.usbipActiveConnections} active import${report.usbipActiveConnections === 1 ? "" : "s"})`,
+        `Input Device: ${report.inputDeviceName ?? "None"} (${report.inputDeviceId || "unset"})`,
+        `Input Sample Rate: ${report.inputSampleRateHz ? `${report.inputSampleRateHz} Hz` : "inactive"}`,
+        `Noise Engine: ${report.noiseEngine}${report.deepfilterFallbackActive ? " (DeepFilterNet fallback active)" : ""}`,
+        `Audio Buffers: underruns=${report.bufferUnderruns}, overflows=${report.bufferOverflowDrops}`,
+        `State: muted=${report.muted}, sidetone=${report.sidetoneEnabled}`,
+      ]
+      await navigator.clipboard.writeText(lines.join("\n"))
+      setDiagnosticsCopied(true)
+      window.setTimeout(() => setDiagnosticsCopied(false), 2000)
+    } catch (err) {
+      console.error("Failed to copy diagnostics:", err)
+    }
+  }
+
+  function handleOpenLogsFolder() {
+    invoke("open_logs_folder").catch(console.error)
+  }
+
   function handleResetAll() {
     onWindowsSettingsChange(DEFAULT_WINDOWS_SETTINGS)
     onSystemSettingsChange(DEFAULT_SYSTEM_SETTINGS)
@@ -262,13 +360,23 @@ export function SettingsPanel({
             const Icon = section.icon
             const isActive = section.id === active
             const isBehavior = section.id === "behavior"
+            const isMaintenance = section.id === "danger"
+            const handleSectionEnter = () => {
+              if (appearanceSettings.reduceMotion) return
+              if (isBehavior) slidersRef.current?.startAnimation()
+              if (isMaintenance) wrenchRef.current?.startAnimation()
+            }
+            const handleSectionLeave = () => {
+              if (isBehavior) slidersRef.current?.stopAnimation()
+              if (isMaintenance) wrenchRef.current?.stopAnimation()
+            }
             return (
               <li key={section.id}>
                 <button
                   type="button"
                   onClick={() => handleNavClick(section.id)}
-                  onMouseEnter={isBehavior ? () => { if (!appearanceSettings.reduceMotion) slidersRef.current?.startAnimation() } : undefined}
-                  onMouseLeave={isBehavior ? () => slidersRef.current?.stopAnimation() : undefined}
+                  onMouseEnter={isBehavior || isMaintenance ? handleSectionEnter : undefined}
+                  onMouseLeave={isBehavior || isMaintenance ? handleSectionLeave : undefined}
                   aria-current={isActive ? "page" : undefined}
                   className={cn(
                     "group flex h-8 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] font-medium transition-colors duration-200 outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
@@ -279,6 +387,8 @@ export function SettingsPanel({
                 >
                   {isBehavior ? (
                     <SlidersHorizontalIcon ref={slidersRef} size={14} className="shrink-0" />
+                  ) : isMaintenance ? (
+                    <WrenchIcon ref={wrenchRef} size={14} className="shrink-0" />
                   ) : (
                     Icon && <Icon className={cn("size-3.5 shrink-0", ICON_HOVER_ANIMATION[section.id])} />
                   )}
@@ -305,29 +415,46 @@ export function SettingsPanel({
               label="Version"
               hint={
                 appVersion
-                  ? updateStatus === "current"
-                    ? `v${appVersion} - up to date`
-                    : updateStatus === "available"
-                      ? `v${appVersion} - v${latestVersion} available`
-                      : updateStatus === "installing"
-                        ? `v${appVersion} - downloading & installing v${latestVersion}…`
-                        : updateStatus === "install-error"
-                          ? `v${appVersion} - install failed`
-                          : updateStatus === "error"
-                            ? `v${appVersion} - couldn't check`
-                            : `v${appVersion}`
+                  ? updateStatus === "installing"
+                    ? `v${appVersion} - downloading & installing v${latestVersion}…`
+                    : updateStatus === "install-error"
+                      ? `v${appVersion} - install failed`
+                      : scheduledProgress
+                        ? scheduledProgress.phase === "waiting-network"
+                          ? `v${appVersion} - waiting for network for v${scheduledProgress.version}…`
+                          : scheduledProgress.phase === "installing"
+                            ? `v${appVersion} - installing v${scheduledProgress.version}…`
+                            : `v${appVersion} - downloading scheduled update v${scheduledProgress.version}…`
+                        : scheduledUpdate
+                          ? `v${appVersion} - v${scheduledUpdate.version} scheduled for next launch`
+                          : updateStatus === "current"
+                            ? `v${appVersion} - up to date`
+                            : updateStatus === "available"
+                              ? `v${appVersion} - v${latestVersion} available`
+                              : updateStatus === "error"
+                                ? `v${appVersion} - couldn't check`
+                                : `v${appVersion}`
                   : "Loading…"
               }
+              secondaryButtonLabel={
+                scheduledUpdate && updateStatus !== "installing" ? "Cancel" : undefined
+              }
+              onSecondaryAction={onCancelScheduledUpdate}
+              secondaryDisabled={scheduledProgress?.phase === "installing"}
               buttonLabel={
                 updateStatus === "checking"
                   ? "Checking…"
-                  : updateStatus === "installing"
+                  : updateStatus === "installing" || scheduledProgress !== null
                     ? "Installing…"
-                    : updateStatus === "available" || updateStatus === "install-error"
-                      ? "Install update"
-                      : "Check for Update"
+                    : scheduledUpdate
+                      ? "Install now"
+                      : updateStatus === "available" || updateStatus === "install-error"
+                        ? "Install update"
+                        : "Check for Update"
               }
               buttonVariant={
+                scheduledUpdate ||
+                scheduledProgress !== null ||
                 updateStatus === "available" ||
                 updateStatus === "installing" ||
                 updateStatus === "install-error"
@@ -335,11 +462,15 @@ export function SettingsPanel({
                   : "outline"
               }
               onAction={
-                updateStatus === "available" || updateStatus === "install-error"
+                scheduledUpdate || updateStatus === "available" || updateStatus === "install-error"
                   ? handleInstallUpdate
                   : handleCheckForUpdate
               }
-              disabled={updateStatus === "checking" || updateStatus === "installing"}
+              disabled={
+                updateStatus === "checking" ||
+                updateStatus === "installing" ||
+                scheduledProgress !== null
+              }
             />
             <Separator />
             <ChangelogList entries={CHANGELOG} />
@@ -584,6 +715,15 @@ export function SettingsPanel({
                     onSystemSettingsChange({ talkingWhileMutedPopup: checked })
                   }
                 />
+                <Separator />
+                <ToggleRow
+                  label="Show persistent mute pill"
+                  hint="Keep a compact, click-through mute indicator at the top center of your screen."
+                  checked={systemSettings.persistentPillEnabled}
+                  onCheckedChange={(checked) =>
+                    onSystemSettingsChange({ persistentPillEnabled: checked })
+                  }
+                />
               </SettingsGroup>
 
               <SettingsGroup
@@ -713,12 +853,134 @@ export function SettingsPanel({
             </SettingsSection>
           )}
 
+          {active === "profiles" && (
+            <ProfilesSection
+              profilesConfig={profilesConfig}
+              currentSnapshot={{
+                systemSettings,
+                appearanceSettings,
+                keybindsSettings,
+                windowsSettings,
+                noiseSettings,
+                softwareGain,
+              }}
+              trackedApps={trackedApps}
+              onProfilesConfigChange={onProfilesConfigChange}
+              onApplyProfile={onApplyProfile}
+            />
+          )}
+
           {active === "danger" && (
             <SettingsSection
-            title="Danger Zone"
-            description="Reset your settings"
-          >
-              <SettingsGroup>
+              title="Maintenance"
+              description="Virtual mic health, diagnostics, logs, and reset options."
+            >
+              <SettingsGroup title="Virtual mic health">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-[13px] font-medium text-foreground">
+                      Virtual Mic Driver
+                    </span>
+                    <span className="text-xs leading-relaxed text-muted-foreground">
+                      {diagnostics === null
+                        ? "Checking Windows audio endpoints..."
+                        : diagnostics.virtualMicFound
+                          ? "Voxis Microphone is registered and available to apps."
+                          : diagnostics.usbipInstalled
+                            ? "USBip is installed, waiting for virtual device attach."
+                            : "USBip driver was not found at C:\\Program Files\\USBip."}
+                    </span>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {diagnostics !== null && !diagnostics.virtualMicFound && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={virtualMicStatus?.state === "installing"}
+                        onClick={() => onRetryUsbipSetup(!diagnostics.usbipInstalled)}
+                        className="h-7 px-2.5 text-xs"
+                      >
+                        {virtualMicStatus?.state === "installing"
+                          ? "Installing…"
+                          : diagnostics.usbipInstalled
+                            ? "Retry attach"
+                            : "Install driver"}
+                      </Button>
+                    )}
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                        diagnostics === null
+                          ? "bg-muted text-muted-foreground"
+                          : diagnostics.virtualMicFound
+                            ? "bg-primary/15 text-primary"
+                            : diagnostics.usbipInstalled
+                              ? "bg-warning/15 text-warning"
+                              : "bg-destructive/15 text-destructive",
+                      )}
+                    >
+                      {diagnostics === null
+                        ? "Checking"
+                        : diagnostics.virtualMicFound
+                          ? "Healthy"
+                          : diagnostics.usbipInstalled
+                            ? "Detached"
+                            : "Missing"}
+                    </span>
+                  </div>
+                </div>
+                <Separator />
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="text-[13px] font-medium text-foreground">
+                      USBip Daemon
+                    </span>
+                    <span className="text-xs leading-relaxed text-muted-foreground">
+                      {diagnostics === null
+                        ? "Checking 127.0.0.1:3240..."
+                        : diagnostics.usbipListening
+                          ? `Listening on 127.0.0.1:3240 (${diagnostics.usbipActiveConnections} active ${diagnostics.usbipActiveConnections === 1 ? "stream" : "streams"}).`
+                          : "Local USBip server is not listening on 127.0.0.1:3240."}
+                    </span>
+                  </div>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                      diagnostics === null
+                        ? "bg-muted text-muted-foreground"
+                        : diagnostics.usbipListening && diagnostics.usbipActiveConnections > 0
+                          ? "bg-primary/15 text-primary"
+                          : diagnostics.usbipListening
+                            ? "bg-warning/15 text-warning"
+                            : "bg-destructive/15 text-destructive",
+                    )}
+                  >
+                    {diagnostics === null
+                      ? "Checking"
+                      : diagnostics.usbipListening && diagnostics.usbipActiveConnections > 0
+                        ? "Connected"
+                        : diagnostics.usbipListening
+                          ? "Idle"
+                          : "Offline"}
+                  </span>
+                </div>
+                <Separator />
+                <ActionRow
+                  label="Copy diagnostics"
+                  hint="Copies driver, daemon, sample rate, noise engine, and buffer stats."
+                  buttonLabel={diagnosticsCopied ? "Copied" : "Copy"}
+                  onAction={handleCopyDiagnostics}
+                />
+                <Separator />
+                <ActionRow
+                  label="Open logs folder"
+                  hint="Opens the folder containing application and audio worker logs."
+                  buttonLabel="Open"
+                  onAction={handleOpenLogsFolder}
+                />
+              </SettingsGroup>
+
+              <SettingsGroup title="Reset">
                 <ResetAllRow onConfirm={handleResetAll} />
               </SettingsGroup>
 

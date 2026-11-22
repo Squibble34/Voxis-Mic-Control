@@ -2,6 +2,7 @@ export type SystemSettings = {
   popupEnabled: boolean
   popupLocation: string
   talkingWhileMutedPopup: boolean
+  persistentPillEnabled: boolean
   soundEnabled: boolean
   soundVolume: number
   autoMuteEnabled: boolean
@@ -12,6 +13,7 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   popupEnabled: true,
   popupLocation: "top-right",
   talkingWhileMutedPopup: true,
+  persistentPillEnabled: false,
   soundEnabled: true,
   soundVolume: 70,
   autoMuteEnabled: true,
@@ -105,4 +107,43 @@ export const DEFAULT_NOISE_SETTINGS: NoiseSettings = {
   noiseGateEnabled: false,
   noiseGateThreshold: 6,
   compressorEnabled: false,
+}
+
+export type ProfileSnapshot = {
+  systemSettings: SystemSettings
+  appearanceSettings: AppearanceSettings
+  keybindsSettings: KeybindsSettings
+  windowsSettings: WindowsSettings
+  noiseSettings: NoiseSettings
+  softwareGain: number
+}
+
+export type VoxisProfile = {
+  id: string
+  name: string
+  snapshot: ProfileSnapshot
+}
+
+export type ProfileRule = {
+  id: string
+  appMatch: string
+  appLabel: string
+  profileId: string
+  enabled: boolean
+}
+
+export type ProfilesConfig = {
+  profiles: VoxisProfile[]
+  defaultProfileId: string | null
+  activeProfileId: string | null
+  rules: ProfileRule[]
+  autoSwitchEnabled: boolean
+}
+
+export const DEFAULT_PROFILES_CONFIG: ProfilesConfig = {
+  profiles: [],
+  defaultProfileId: null,
+  activeProfileId: null,
+  rules: [],
+  autoSwitchEnabled: true,
 }
